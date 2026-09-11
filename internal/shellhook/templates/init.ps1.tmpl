@@ -1,0 +1,23 @@
+function sk {
+    if ($args.Count -ge 1 -and ($args[0] -eq "use" -or $args[0] -eq "remove")) {
+        # sk.exe, WITH the extension, deliberately -- the same bypass
+        # technique zsh's own template uses (`command sk`) and
+        # Nushell's uses (`^sk`), just PowerShell's own mechanism for
+        # it: a function named exactly "sk" does NOT match "sk.exe",
+        # so this reaches the real, installed binary on PATH rather
+        # than recursing into this very function.
+        $output = & sk.exe @args --shell-format=powershell
+        if ($output) {
+            # Joined into ONE string, not invoked line-by-line -- the
+            # direct structural counterpart to zsh's own `eval
+            # "$(command sk "$@")"`: sk's own PowerShell-format output
+            # can itself span multiple lines (e.g. the PATH-
+            # deduplication block), and Invoke-Expression, like zsh's
+            # eval, correctly executes a full, multi-line script block
+            # as one unit when given the whole thing at once.
+            Invoke-Expression ($output -join "`n")
+        }
+    } else {
+        & sk.exe @args
+    }
+}

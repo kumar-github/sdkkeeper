@@ -1,0 +1,120 @@
+def --env sk [...args] {
+    # A real, live-caught bug: Nushell's OWN parser converts a bare,
+    # unquoted `null` word into its OWN `nothing` type at PARSE TIME,
+    # not the literal string "null" -- confirmed directly by testing
+    # a real `[...args]` rest capture. `sk use java null` (this
+    # project's own, deliberately designed "clear active state"
+    # syntax -- see resolve.go's own doc comment) therefore arrived
+    # here as `["use", "java", (nothing)]`, not
+    # `["use", "java", "null"]` -- and forwarding that `nothing` value
+    # straight to the external ^sk binary failed outright with "can't
+    # convert nothing to string", making this entire feature silently
+    # broken specifically through this wrapper, even though sk itself
+    # (and both the zsh and PowerShell wrappers) handle the identical
+    # command correctly. Mapped back to the literal string here,
+    # once, before anything else touches $args -- the only way a
+    # `nothing` value can appear in this rest capture at all is a
+    # bare `null` the user actually typed, so this mapping is safe
+    # and unambiguous.
+    let args = ($args | each {|a| if ($a == null) { "null" } else { $a } })
+
+    if ($args | length) >= 1 and (($args | get 0) == "use" or ($args | get 0) == "remove") {
+        let result = (^sk ...$args --shell-format=json | complete)
+        # A real, live-reported bug, confirmed by actually reproducing
+        # it through a real nu session (not caught by any earlier
+        # testing, which only ever exercised the SUCCESS path -- a
+        # real activation/deactivation -- never the "nothing to
+        # do"/"nothing found"/picker-cancelled paths): every
+        # human-readable status or error message sk prints goes to
+        # session.Out, which falls back to plain stderr whenever a
+        # real controlling terminal isn't available to it -- and that
+        # is exactly what happens for `sk` spawned this way, under
+        # `| complete` specifically (confirmed directly: the same
+        # binary, run directly rather than through this wrapper,
+        # prints these same messages correctly). `| complete` captures
+        # BOTH stdout and stderr into this $result record -- nothing
+        # printed `$result.stderr` anywhere, so every one of those
+        # messages was silently discarded: "No JDK versions found to
+        # use.", "No JDK version selected to use.", a picker failing
+        # outright, all of it, vanishing with zero visible trace to
+        # the user. Printed here now, unconditionally, whenever
+        # present -- regardless of whether stdout also parses as JSON
+        # below, since a real activation can ALSO carry an informational
+        # message alongside its machine-readable output.
+        if ($result.stderr | str trim | is-not-empty) {
+            print -e ($result.stderr | str trim)
+        }
+        let out = ($result.stdout | str trim)
+        if ($out | is-not-empty) {
+            let data = ($out | from json)
+            for key in ($data | columns) {
+                if $key == "unset" {
+                    # load-env with a null value, NOT hide-env -- a
+                    # real, live-caught bug: hide-env's effect
+                    # silently fails to persist back to the caller
+                    # whenever ANY other $env.X = ... mutation ALSO
+                    # happens in the same --env function call
+                    # (confirmed directly, a genuine, surprising
+                    # Nushell scoping/merge behavior -- not an
+                    # ordering issue, reproduced even with hide-env
+                    # called strictly AFTER every other mutation).
+                    # Since this wrapper ALSO mutates $env.PATH in the
+                    # very same call whenever a version is being
+                    # deactivated, hide-env silently did nothing here
+                    # in exactly the real scenario this whole branch
+                    # exists for. A null-valued env var, confirmed
+                    # directly by spawning a real external process,
+                    # is correctly OMITTED from what that process
+                    # actually sees -- functionally equivalent to
+                    # being unset, even though it still shows as a
+                    # present key with a null value inside Nushell's
+                    # own $env record internally.
+                    for name in ($data | get unset) {
+                        load-env {($name): null}
+                    }
+                } else if $key == "path_remove" {
+                    # A real gap found via actual use: `sk use` prepends
+                    # a version's bin directory every time it's called,
+                    # but never removes an EARLIER prepend when a
+                    # DIFFERENT version is later activated in the same
+                    # session. Clearing the env var alone wasn't enough
+                    # to fix this -- PATH resolution (e.g. `java
+                    # -version`) could still land on some other,
+                    # unexpected version still sitting in PATH from an
+                    # earlier `sk use` call. $env.PATH is a real list
+                    # here, not a colon-separated string, so removing a
+                    # specific entry is a plain filter.
+                    for dir in ($data | get path_remove) {
+                        $env.PATH = ($env.PATH | where $it != $dir)
+                    }
+                } else if $key != "PATH_PREPEND" and $key != "PATH_STRIP_PREFIXES" {
+                    load-env {($key): ($data | get $key)}
+                }
+            }
+            if "PATH_STRIP_PREFIXES" in ($data | columns) {
+                # A real, confirmed bug this exists to fix: `sk use`
+                # only ever PREPENDED, never cleaning up an earlier
+                # prepend for the same tool -- switching JDKs (or the
+                # same activation firing more than once in a session)
+                # silently accumulated MULTIPLE entries for the same
+                # tool on PATH, without bound. The direct, observed
+                # consequence: removing the currently-active JDK
+                # correctly cleared JAVA_HOME, but `java` still
+                # resolved to whichever EARLIER, still-accumulated
+                # entry came next -- looking exactly like "removing
+                # the active JDK doesn't work". Filtering by PREFIX
+                # (not exact match) here ensures at most one entry per
+                # tool ever persists, regardless of which specific
+                # version it was.
+                let prefixes = ($data | get PATH_STRIP_PREFIXES)
+                $env.PATH = ($env.PATH | where {|it| not ($prefixes | any {|p| $it | str starts-with $p }) })
+            }
+            if "PATH_PREPEND" in ($data | columns) {
+                let dirs = ($data | get PATH_PREPEND | split row ":")
+                $env.PATH = ($dirs | append $env.PATH)
+            }
+        }
+    } else {
+        ^sk ...$args
+    }
+}

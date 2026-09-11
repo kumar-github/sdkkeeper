@@ -1,0 +1,12 @@
+*
+!.gitignore
+!*/
+!*.go
+!*.tmpl
+!README.md
+!go.mod
+!go.sum
+!TESTING.md
+!*.yml
+!*.yaml
+!*.sh

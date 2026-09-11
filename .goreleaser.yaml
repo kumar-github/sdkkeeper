@@ -1,0 +1,118 @@
+# .goreleaser.yaml -- lives in the sdkkeeper repo itself. This is a
+# build/release automation config, not a Homebrew- or Scoop-specific
+# file: it knows how to cross-compile the binary and, as one part of
+# that, hand the result to Homebrew/Scoop's own publishing steps. The
+# actual Ruby/JSON files Homebrew and Scoop read are generated and
+# pushed automatically by GoReleaser on every release -- never
+# hand-written, never committed to this repo.
+version: 2
+
+project_name: sdkkeeper
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sk
+    main: ./cmd/sk
+    binary: sk
+    # Deliberately not "go install"-shaped: -trimpath and the pinned
+    # ldflags below make two separate CI runs from the same tag
+    # produce byte-identical binaries, so a checksum can be trusted.
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    flags:
+      - -trimpath
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Windows/arm64 is real, but genuinely untested territory for
+      # this project (see the Windows milestone's own scope) --
+      # left out rather than silently shipping something unverified.
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: sk-archive
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+# Real, live GitHub milestone this repo already has, and CI already
+# gates on: keep it visible here too, not just in ci.yml, since this
+# release step runs the same binary the rest of CI validated.
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+# ── Homebrew ─────────────────────────────────────────────────────
+# homebrew_casks (not the deprecated/removed "brews") -- current,
+# actively supported GoReleaser path, no old-version pinning needed.
+# Generates and pushes Casks/sdkkeeper.rb to the packaging repo below
+# on every tagged release; never hand-edited.
+homebrew_casks:
+  - name: sdkkeeper
+    # Explicit, not left to default to project_name ("sdkkeeper") --
+    # a real bug caught by actually running this config: the archive
+    # inside actually contains a binary named "sk" (see builds.binary
+    # above), and without this override the generated cask installs
+    # it under the wrong name, breaking `sk <command>` entirely for
+    # every real user immediately after install.
+    binaries: ["sk"]
+    repository:
+      owner: kumar-github
+      name: sdkkeeper-packaging
+      token: "{{ .Env.PACKAGING_REPO_TOKEN }}"
+    homepage: "https://github.com/kumar-github/sdkkeeper"
+    description: "SDK Keeper -- explicit, no-default SDK version manager"
+    # TODO: set a real license once one is added to the repo (there
+    # isn't one yet) -- e.g. license "MIT" in Homebrew's own sense.
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    # Required, not optional, given this project's own real state:
+    # confirmed directly from several other real projects needing the
+    # identical fix -- an unsigned, unnotarized macOS binary (which
+    # sk's own darwin builds are, with no Apple Developer certificate
+    # in this project at all) gets macOS's quarantine attribute set
+    # the moment Homebrew downloads it. Without stripping it here,
+    # EVERY macOS user hits "sk is damaged and can't be opened" on
+    # first run -- not a rare edge case, the default, unconditional
+    # outcome for every install.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/sk"]
+          end
+
+# ── Scoop (Windows) ──────────────────────────────────────────────
+# Same packaging repo as Homebrew above -- one external repo, not
+# two -- Scoop has no naming convention of its own to fight either.
+scoops:
+  - name: sdkkeeper
+    repository:
+      owner: kumar-github
+      name: sdkkeeper-packaging
+      token: "{{ .Env.PACKAGING_REPO_TOKEN }}"
+    directory: bucket
+    homepage: "https://github.com/kumar-github/sdkkeeper"
+    description: "SDK Keeper -- explicit, no-default SDK version manager"

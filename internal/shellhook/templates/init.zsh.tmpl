@@ -1,0 +1,7 @@
+sk() {
+    if [[ "$1" == "use" || "$1" == "remove" ]]; then
+        eval "$(command sk "$@")"
+    else
+        command sk "$@"
+    fi
+}
