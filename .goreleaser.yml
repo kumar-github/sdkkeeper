@@ -81,10 +81,47 @@ homebrew_casks:
       owner: kumar-github
       name: sdkkeeper-packaging
       token: "{{ .Env.PACKAGING_REPO_TOKEN }}"
+    # A SECOND, separate `name` stanza -- Homebrew's own Cask DSL
+    # explicitly allows repeating `name` for alternate/display names,
+    # confirmed directly from Homebrew's own Cask Language Reference:
+    # "the first instance should follow the canonical branding as
+    # defined by the vendor". custom_block is placed at the TOP of
+    # the generated cask (confirmed directly, via a real build) --
+    # ahead of the auto-generated `name "sdkkeeper"` lower down -- so
+    # this becomes the primary display name (shown in `brew info`),
+    # while the actual install TOKEN (`brew install --cask sdkkeeper`)
+    # stays lowercase, unaffected: Homebrew cask tokens can't contain
+    # spaces or mixed case, so the two genuinely have to be different
+    # strings, not just styled differently.
+    custom_block: |
+      name "SDK Keeper"
     homepage: "https://github.com/kumar-github/sdkkeeper"
     description: "SDK Keeper -- explicit, no-default SDK version manager"
     # TODO: set a real license once one is added to the repo (there
     # isn't one yet) -- e.g. license "MIT" in Homebrew's own sense.
+    #
+    # Templates confirmed working here directly -- not assumed from
+    # docs, which don't explicitly mark this field the way they do
+    # description/hooks: built a real snapshot release and inspected
+    # the actual generated Casks/sdkkeeper.rb, confirming
+    # {{ .ProjectName }}/{{ .Version }} substitute correctly. Text
+    # below uses the literal "SDK Keeper" display name rather than
+    # {{ .ProjectName }} deliberately, though -- the template variable
+    # renders as the lowercase install token ("sdkkeeper"), not the
+    # proper product name, and the whole point here is showing the
+    # name the user should actually recognize, with the real command
+    # (`sk`, genuinely different from either name) called out
+    # explicitly up front so nobody goes looking for an `sdkkeeper`
+    # command that doesn't exist.
+    caveats: |
+      SDK Keeper is installed. The command is `sk` (not sdkkeeper) -- and it needs one more step to actually work in your shell:
+
+        echo 'command -v sk >/dev/null && eval "$(sk init zsh)"' >> ~/.zshrc
+
+      Then restart your shell (or run: source ~/.zshrc)
+
+      If you ever uninstall SDK Keeper, remove that line from ~/.zshrc too:
+        sed -i '' '/eval.*sk init zsh/d' ~/.zshrc
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
@@ -97,12 +134,27 @@ homebrew_casks:
     # EVERY macOS user hits "sk is damaged and can't be opened" on
     # first run -- not a rare edge case, the default, unconditional
     # outcome for every install.
+    #
+    # The uninstall hook is a SEPARATE, genuine correction: an
+    # earlier answer in this project's own history wrongly claimed no
+    # post-uninstall messaging mechanism exists in Homebrew casks at
+    # all -- confirmed wrong directly from Homebrew's own official
+    # docs (docs.brew.sh), which document a real, currently-supported
+    # uninstall_postflight stanza (system_command included in its own
+    # method list). Not the same thing as the still-unimplemented
+    # "zap script" feature request this project's own history also
+    # correctly flagged separately -- two different mechanisms,
+    # confirmed not to be confused with each other here.
     hooks:
       post:
         install: |
           if OS.mac?
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/sk"]
           end
+        uninstall: |
+          system_command "/bin/echo", args: ["SDK Keeper has been removed."]
+          system_command "/bin/echo", args: ["If you added the shell integration line to ~/.zshrc, you may want to remove it too:"]
+          system_command "/bin/echo", args: ["  sed -i '' '/eval.*sk init zsh/d' ~/.zshrc"]
 
 # ── Scoop (Windows) ──────────────────────────────────────────────
 # Same packaging repo as Homebrew above -- one external repo, not
@@ -116,3 +168,31 @@ scoops:
     directory: bucket
     homepage: "https://github.com/kumar-github/sdkkeeper"
     description: "SDK Keeper -- explicit, no-default SDK version manager"
+    # Scoop's own config has no direct equivalent of Homebrew's
+    # caveats field (checked the real GoReleaser schema directly --
+    # only pre_install/post_install exist, both arrays of PowerShell
+    # COMMANDS to run, not a display-message field). Achieves the
+    # same practical outcome via Write-Host instead. Unlike zsh's
+    # guarded eval line, PowerShell's own wrapper has no equivalent
+    # "stale line errors on startup" problem -- an unused profile
+    # function is inert either way, so no uninstall-side note is
+    # needed here the way the zsh caveats above has one.
+    #
+    # Name hardcoded, NOT templated with {{ .ProjectName }} -- unlike
+    # the Homebrew cask's caveats/hooks above (confirmed directly to
+    # template correctly, via a real build), this specific field was
+    # confirmed NOT to: the same {{ .ProjectName }} syntax, in the
+    # actual generated manifest, came through completely unsubstituted,
+    # literal braces and all. A real, field-specific limitation in
+    # GoReleaser's Scoop support, not a syntax mistake -- the identical
+    # syntax worked correctly one field over, in the same build. Uses
+    # the literal "SDK Keeper" display name here too, for the same
+    # reason as the cask's caveats above -- and calls out `sk` as the
+    # real command explicitly, so nobody goes looking for an
+    # `sdkkeeper` command that doesn't exist.
+    post_install:
+      - 'Write-Host ""'
+      - 'Write-Host "SDK Keeper is installed. The command is sk (not sdkkeeper) -- and it needs one more step to actually work in PowerShell:"'
+      - 'Write-Host "  sk init powershell | Out-File -Append $PROFILE"'
+      - 'Write-Host ""'
+      - 'Write-Host "Then restart PowerShell (or run: . $PROFILE)"'
