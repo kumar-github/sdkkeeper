@@ -113,15 +113,35 @@ homebrew_casks:
     # (`sk`, genuinely different from either name) called out
     # explicitly up front so nobody goes looking for an `sdkkeeper`
     # command that doesn't exist.
+    #
+    # Deliberately asks the user to add/remove the line manually,
+    # rather than an auto-append (echo ... >> ~/.zshrc) or auto-strip
+    # (sed ... ~/.zshrc) command -- ~/.zshrc isn't a safe assumption
+    # for where zsh config actually lives (dotfiles managers commonly
+    # relocate it), so a command that assumes that specific path could
+    # silently write to or edit the wrong file, or just fail
+    # confusingly, for anyone using a non-default setup. Also
+    # deliberately NOT using the earlier `command -v sk >/dev/null &&`
+    # guarded form here -- a real, valid concern that it reads as
+    # intimidating boilerplate to a first-time user seeing shell
+    # config instructions for the first time; the plain, direct
+    # `eval "$(sk init zsh)"` line matches what `sk init zsh --help`
+    # itself already recommends.
     caveats: |
-      SDK Keeper is installed. The command is `sk` (not sdkkeeper) -- and it needs one more step to actually work in your shell:
+      SDK Keeper is installed. The command is `sk` (not sdkkeeper).
 
-        echo 'command -v sk >/dev/null && eval "$(sk init zsh)"' >> ~/.zshrc
+      == Setup ==
+      Add this to your shell config file (usually ~/.zshrc, but yours may live elsewhere -- e.g. inside a dotfiles setup). Add it at the end of the file, or next to any similar init lines you already have (e.g. if you use starship, right next to its own init line is a good spot):
 
-      Then restart your shell (or run: source ~/.zshrc)
+        # -------------------------------------------------------------------------------------------
+        # ---------------------------------------- SDK Keeper ---------------------------------------
+        # -------------------------------------------------------------------------------------------
+        eval "$(sk init zsh)"
 
-      If you ever uninstall SDK Keeper, remove that line from ~/.zshrc too:
-        sed -i '' '/eval.*sk init zsh/d' ~/.zshrc
+      Then restart your shell (or re-source whichever file you added it to -- again, that may not be ~/.zshrc).
+
+      == Cleanup ==
+      Remove that same block when uninstalling SDK Keeper.
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
@@ -153,8 +173,10 @@ homebrew_casks:
           end
         uninstall: |
           system_command "/bin/echo", args: ["SDK Keeper has been removed."]
-          system_command "/bin/echo", args: ["If you added the shell integration line to ~/.zshrc, you may want to remove it too:"]
-          system_command "/bin/echo", args: ["  sed -i '' '/eval.*sk init zsh/d' ~/.zshrc"]
+          system_command "/bin/echo", args: ["If you added the shell integration line to your shell config file, you may want to remove it too."]
+          system_command "/bin/echo", args: ["If you forget, your next new shell will show something like:"]
+          system_command "/bin/echo", args: ["  .zshrc:LINE: command not found: sk"]
+          system_command "/bin/echo", args: ["That error is the sign -- go remove the block."]
 
 # ── Scoop (Windows) ──────────────────────────────────────────────
 # Same packaging repo as Homebrew above -- one external repo, not
@@ -192,7 +214,11 @@ scoops:
     # `sdkkeeper` command that doesn't exist.
     post_install:
       - 'Write-Host ""'
-      - 'Write-Host "SDK Keeper is installed. The command is sk (not sdkkeeper) -- and it needs one more step to actually work in PowerShell:"'
+      - 'Write-Host "SDK Keeper is installed. The command is sk (not sdkkeeper)."'
+      - 'Write-Host ""'
+      - 'Write-Host "== Setup =="'
+      - 'Write-Host "Run this once to add sk to your PowerShell profile:"'
+      - 'Write-Host ""'
       - 'Write-Host "  sk init powershell | Out-File -Append $PROFILE"'
       - 'Write-Host ""'
       - 'Write-Host "Then restart PowerShell (or run: . $PROFILE)"'
