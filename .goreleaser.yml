@@ -128,20 +128,26 @@ homebrew_casks:
     # `eval "$(sk init zsh)"` line matches what `sk init zsh --help`
     # itself already recommends.
     caveats: |
+
       SDK Keeper is installed. The command is `sk` (not sdkkeeper).
 
-      == Setup ==
-      Add this to your shell config file (usually ~/.zshrc, but yours may live elsewhere -- e.g. inside a dotfiles setup). Add it at the end of the file, or next to any similar init lines you already have (e.g. if you use starship, right next to its own init line is a good spot):
+      === Setup ===
 
-        # -------------------------------------------------------------------------------------------
-        # ---------------------------------------- SDK Keeper ---------------------------------------
-        # -------------------------------------------------------------------------------------------
-        eval "$(sk init zsh)"
+      Add this to your shell config file (usually ~/.zshrc, but yours may live elsewhere -- e.g. inside a dotfiles setup).
+      Add it at the end of the file, or next to any similar init lines you already have.
+      Example: If you use starship, right next to its own init line is a good spot.
+
+      # -------------------------------------------------------------------------------------------
+      # ---------------------------------------- SDK Keeper ---------------------------------------
+      # -------------------------------------------------------------------------------------------
+      eval "$(sk init zsh)"
 
       Then restart your shell (or re-source whichever file you added it to -- again, that may not be ~/.zshrc).
 
-      == Cleanup ==
+      === Cleanup ===
+
       Remove that same block when uninstalling SDK Keeper.
+
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
