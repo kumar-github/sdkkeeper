@@ -174,11 +174,11 @@ homebrew_casks:
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/sk"]
           end
         uninstall: |
-          system_command "/bin/echo", args: ["SDK Keeper has been removed."]
-          system_command "/bin/echo", args: ["If you added the shell integration line to your shell config file, you may want to remove it too."]
-          system_command "/bin/echo", args: ["If you forget, your next new shell will show something like:"]
-          system_command "/bin/echo", args: ["  .zshrc:LINE: command not found: sk"]
-          system_command "/bin/echo", args: ["That error is the sign -- go remove the block."]
+          system_command "/bin/echo", args: ["SDK Keeper has been removed."], print_stdout: true
+          system_command "/bin/echo", args: ["If you added the shell integration line to your shell config file, you may want to remove it too."], print_stdout: true
+          system_command "/bin/echo", args: ["If you forget, your next new shell will show something like:"], print_stdout: true
+          system_command "/bin/echo", args: ["  .zshrc:LINE: command not found: sk"], print_stdout: true
+          system_command "/bin/echo", args: ["That error is the sign -- go remove the block."], print_stdout: true
 
 # ── Scoop (Windows) ──────────────────────────────────────────────
 # Same packaging repo as Homebrew above -- one external repo, not
