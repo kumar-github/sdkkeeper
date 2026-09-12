@@ -132,13 +132,10 @@ homebrew_casks:
 
       ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-      Add this to your shell config file (usually ~/.zshrc, but yours may live elsewhere -- e.g. inside a dotfiles setup).
+      Add the below one line config to your shell config file (usually ~/.zshrc, but yours may live elsewhere -- e.g. inside a dotfiles setup).
       Add it at the end of the file, or next to any similar init lines you already have.
-      Example: Below is the example of mine added at the end of the .zshrc file with comments for the future myself
 
-        # -----------------------------------------------------------------------------------------
-        # --------------------------------------- SDK Keeper --------------------------------------
-        # -----------------------------------------------------------------------------------------
+        # SDK Keeper
         eval "$(sk init zsh)"
 
       Then restart your shell (or re-source whichever file you added it to -- again, that may not be ~/.zshrc).
