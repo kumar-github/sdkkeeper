@@ -108,7 +108,7 @@ homebrew_casks:
 
           ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-          Add the below one line config at the end of your shell config file (#{zshrc_path}).
+          Add the below block at the end of your shell config file (#{zshrc_path}).
 
             # SDK Keeper
             eval "$(sk init zsh)"
@@ -121,13 +121,13 @@ homebrew_casks:
 
           ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Cleanup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-          1. Remove the below lines from #{zshrc_path} after uninstalling SDK Keeper.
+          1. Remove the below block from your shell config file (#{zshrc_path}) after uninstalling SDK Keeper.
 
             # SDK Keeper
             eval "$(sk init zsh)"
 
-          2. Delete the hidden `.sdkkeeper` folder from the user home directory (~).
-          Note: This is where all the downloaded JDKs and SDKs are stored and deleting them is permanant. You can keep them if you want to use later.
+          2. Delete the hidden `.sdkkeeper` folder from the user home directory (typically ~/.sdkkeeper).
+          Note: This is where all the downloaded JDKs and SDKs are stored and deleting them is permanant. You can keep them if you want to use them later.
         EOS
       end
     commit_author:
