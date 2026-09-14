@@ -42,10 +42,10 @@ builds:
 
 archives:
   - id: sk-archive
-    formats: [ tar.gz ]
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
-        formats: [ zip ]
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
@@ -76,84 +76,64 @@ homebrew_casks:
     # above), and without this override the generated cask installs
     # it under the wrong name, breaking `sk <command>` entirely for
     # every real user immediately after install.
-    binaries: [ "sk" ]
+    binaries: ["sk"]
     repository:
       owner: kumar-github
       name: sdkkeeper-packaging
       token: "{{ .Env.PACKAGING_REPO_TOKEN }}"
-    # A SECOND, separate `name` stanza -- Homebrew's own Cask DSL
-    # explicitly allows repeating `name` for alternate/display names,
-    # confirmed directly from Homebrew's own Cask Language Reference:
-    # "the first instance should follow the canonical branding as
-    # defined by the vendor". custom_block is placed at the TOP of
-    # the generated cask (confirmed directly, via a real build) --
-    # ahead of the auto-generated `name "sdkkeeper"` lower down -- so
-    # this becomes the primary display name (shown in `brew info`),
-    # while the actual install TOKEN (`brew install --cask sdkkeeper`)
-    # stays lowercase, unaffected: Homebrew cask tokens can't contain
-    # spaces or mixed case, so the two genuinely have to be different
-    # strings, not just styled differently.
-    custom_block: |
-      name "SDK Keeper"
     homepage: "https://github.com/kumar-github/sdkkeeper"
     description: "SDK Keeper -- explicit, no-default SDK version manager"
     # TODO: set a real license once one is added to the repo (there
     # isn't one yet) -- e.g. license "MIT" in Homebrew's own sense.
     #
-    # Templates confirmed working here directly -- not assumed from
-    # docs, which don't explicitly mark this field the way they do
-    # description/hooks: built a real snapshot release and inspected
-    # the actual generated Casks/sdkkeeper.rb, confirming
-    # {{ .ProjectName }}/{{ .Version }} substitute correctly. Text
-    # below uses the literal "SDK Keeper" display name rather than
-    # {{ .ProjectName }} deliberately, though -- the template variable
-    # renders as the lowercase install token ("sdkkeeper"), not the
-    # proper product name, and the whole point here is showing the
-    # name the user should actually recognize, with the real command
-    # (`sk`, genuinely different from either name) called out
-    # explicitly up front so nobody goes looking for an `sdkkeeper`
-    # command that doesn't exist.
-    #
-    # Deliberately asks the user to add/remove the line manually,
-    # rather than an auto-append (echo ... >> ~/.zshrc) or auto-strip
-    # (sed ... ~/.zshrc) command -- ~/.zshrc isn't a safe assumption
-    # for where zsh config actually lives (dotfiles managers commonly
-    # relocate it), so a command that assumes that specific path could
-    # silently write to or edit the wrong file, or just fail
-    # confusingly, for anyone using a non-default setup. Also
-    # deliberately NOT using the earlier `command -v sk >/dev/null &&`
-    # guarded form here -- a real, valid concern that it reads as
-    # intimidating boilerplate to a first-time user seeing shell
-    # config instructions for the first time; the plain, direct
-    # `eval "$(sk init zsh)"` line matches what `sk init zsh --help`
-    # itself already recommends.
-    caveats: |
-      SDK Keeper is installed. The command is `sk` (not sdkkeeper).
+    # Both `name` (display name) and `caveats` moved into ONE
+    # custom_block below, as a REAL Ruby `caveats do ... end` block --
+    # NOT the simpler `caveats:` YAML field used before. Deliberate:
+    # GoReleaser's `caveats:` field only ever produces a STATIC string,
+    # fixed at BUILD time on the GitHub Actions runner -- checking
+    # $ZDOTDIR there would read the runner's own environment, not any
+    # real user's. A real `caveats do ... end` block runs live, on the
+    # user's own machine, at their actual `brew install` time, so it
+    # can read $ZDOTDIR/$HOME for real and print the exact resolved
+    # path instead of a hedged "usually ~/.zshrc, but yours may differ".
+    custom_block: |
+      name "SDK Keeper"
 
-      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      caveats do
+        zdotdir = ENV["ZDOTDIR"].to_s.empty? ? ENV["HOME"] : ENV["ZDOTDIR"]
+        zshrc_path = "#{zdotdir}/.zshrc"
+        <<~EOS
+          SDK Keeper is installed. The command is `sk` (not sdkkeeper).
 
-      Add the below one line config to your shell config file (usually `~/.zshrc`, but yours may live elsewhere -- e.g. inside a dotfiles setup).
-      Add it at the end of the file, or next to any similar init lines you already have.
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        # SDK Keeper
-        eval "$(sk init zsh)"
+          Add the below one line config to your shell config file. Based on your $ZDOTDIR/$HOME, that's:
 
-      Then restart your shell (or re-source whichever file you added it to -- again, that may or may not be `~/.zshrc`).
+            #{zshrc_path}
 
-      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Usage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          (If you use a dotfiles manager that relocates this further, add it there instead.)
+          Add it at the end of the file, or next to any similar init lines you already have.
 
-      Just type `sk` and hit enter. You will know what to do next.
+            # SDK Keeper
+            eval "$(sk init zsh)"
 
-      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Cleanup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          Then restart your shell (or re-source that same file).
 
-      1. Remove the below lines from the shell config file after uninstalling SDK Keeper.
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Usage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        # SDK Keeper
-        eval "$(sk init zsh)"
+          Just type `sk` and hit enter. You will know what to do next.
 
-      2. Delete the hidden `.sdkkeeper` folder from the user home directory (`~`).
-      Note: This is where all the downloaded JDKs and SDKs are stored and deleting them is permanant. You can keep them if you want to use later.
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Cleanup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+          1. Remove the below lines from #{zshrc_path} after uninstalling SDK Keeper.
+
+            # SDK Keeper
+            eval "$(sk init zsh)"
+
+          2. Delete the hidden `.sdkkeeper` folder from the user home directory (~).
+          Note: This is where all the downloaded JDKs and SDKs are stored and deleting them is permanant. You can keep them if you want to use later.
+        EOS
+      end
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
@@ -166,17 +146,6 @@ homebrew_casks:
     # EVERY macOS user hits "sk is damaged and can't be opened" on
     # first run -- not a rare edge case, the default, unconditional
     # outcome for every install.
-    #
-    # The uninstall hook is a SEPARATE, genuine correction: an
-    # earlier answer in this project's own history wrongly claimed no
-    # post-uninstall messaging mechanism exists in Homebrew casks at
-    # all -- confirmed wrong directly from Homebrew's own official
-    # docs (docs.brew.sh), which document a real, currently-supported
-    # uninstall_postflight stanza (system_command included in its own
-    # method list). Not the same thing as the still-unimplemented
-    # "zap script" feature request this project's own history also
-    # correctly flagged separately -- two different mechanisms,
-    # confirmed not to be confused with each other here.
     hooks:
       post:
         install: |
