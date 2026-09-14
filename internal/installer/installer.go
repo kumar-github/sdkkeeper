@@ -10,22 +10,28 @@
 // failure modes in Homebrew and SDKMAN (both long-established,
 // widely-used tools):
 //
-//   - Never resume a partial download. SDKMAN has a real, still-open
-//     bug (sdkman-cli#1288) where resuming via HTTP byte-range fails
-//     permanently if the server doesn't support it, leaving an install
-//     that can never complete without manual intervention. Every
-//     attempt here starts a fresh download into a brand new temp file.
-//   - Never use a persistent, reusable download cache. SDKMAN
-//     (sdkman-cli#1005, "reinstallation of cached archives fail") and
-//     Homebrew (multiple long-standing GitHub issues: "repeated
-//     checksum mismatch... removing tarball does not resolve") have
-//     both had real, recurring bugs from stale cached downloads
-//     confusing later attempts. Every attempt's temp files are
-//     uniquely named and fully discarded on any failure -- there is
-//     nothing left behind to go stale.
-//   - Always verify the checksum, and retry (fresh download) on either
-//     a network failure OR a checksum mismatch -- matching Homebrew's
-//     own documented behavior ("--retry: Retry if downloading fails or
+//   - Resume support and a persistent download cache were both
+//     ORIGINALLY, deliberately left out entirely, citing real, cited
+//     bugs in both tools: SDKMAN's sdkman-cli#1288 (resuming via HTTP
+//     byte-range fails permanently if the server doesn't support it,
+//     leaving an install that can never complete without manual
+//     intervention) and sdkman-cli#1005 / several Homebrew issues
+//     (stale or corrupted cached downloads confusing later attempts,
+//     with no automatic recovery). Both features were reconsidered
+//     and implemented later, specifically engineered to avoid those
+//     exact failure modes rather than risk repeating them:
+//     downloadOnce falls back to a clean, full restart the moment a
+//     server doesn't honor a Range request (confirmed directly, via
+//     TestDownloadWithRetry_FallsBackToFreshWhenServerIgnoresRange --
+//     never gets stuck retrying a range the server will never honor),
+//     and checkCache always re-verifies a cached entry's checksum
+//     before trusting it, discarding (never merely warning about) any
+//     entry that doesn't match -- a bad cache entry can only ever
+//     cost the optimization, never block an install the way the cited
+//     bugs did.
+//   - Always verify the checksum, and retry on either a network
+//     failure OR a checksum mismatch -- matching Homebrew's own
+//     documented behavior ("--retry: Retry if downloading fails or
 //     re-download if the checksum... no longer matches").
 //   - Never write anything to the final destination until everything
 //     has been fully verified and extracted -- the ONLY operation that
@@ -101,11 +107,28 @@ type Options struct {
 	// filesystems on some platforms).
 	TempRoot string
 
+	// CacheDir, if non-empty, is where successfully-downloaded,
+	// checksum-verified archives are kept for reuse across installs --
+	// keyed by checksum (not URL), the one thing guaranteed to
+	// uniquely identify "this exact archive's content" regardless of
+	// how a URL might vary. Empty (the default for any existing
+	// caller that doesn't set it) disables caching entirely --
+	// Install behaves exactly as it always has. See checkCache's own
+	// doc comment for how a stale/corrupted cache entry is handled
+	// (discarded, never treated as an install-blocking error) --
+	// deliberately avoiding the exact class of bug the package's own
+	// top-level comment already documents real, cited instances of in
+	// both SDKMAN and Homebrew.
+	CacheDir string
+
 	// MaxAttempts is how many times to retry the download+verify cycle
 	// on failure (network error or checksum mismatch) before giving
-	// up. Each attempt is a completely fresh download -- see the
-	// package doc for why partial-download resume is deliberately not
-	// implemented.
+	// up. Each retry resumes from wherever the previous attempt left
+	// off when the server supports it (falls back to a fresh restart
+	// otherwise) -- see downloadOnce's own doc comment for the full
+	// design, including how it specifically avoids the stuck-forever
+	// failure mode this package's own top-level comment documents a
+	// real instance of in SDKMAN.
 	MaxAttempts int
 
 	// RetryDelay is how long to wait between attempts. A simple fixed
@@ -258,9 +281,36 @@ func Install(ctx context.Context, opts Options) error {
 		}
 	}()
 
-	archivePath, err := downloadWithRetry(ctx, opts)
-	if err != nil {
-		return err
+	// A cache hit is checked BEFORE any download attempt -- if found
+	// and its checksum still genuinely verifies, this skips
+	// downloadWithRetry entirely. See checkCache's own doc comment
+	// for exactly how a stale/corrupted entry is handled (discarded,
+	// never an install-blocking error).
+	var archivePath string
+	if opts.CacheDir != "" {
+		if cachedPath, ok := checkCache(opts); ok {
+			// Copied into a FRESH temp file, never extracted from (or
+			// deleted from) the cache's own copy directly -- a cache
+			// hit must always be non-destructive to the cache itself,
+			// since this same defer below removes archivePath
+			// unconditionally once Install returns.
+			if copied, copyErr := copyToTemp(opts.TempRoot, cachedPath); copyErr == nil {
+				archivePath = copied
+				opts.progress("Using cached download")
+			}
+			// Any copy failure falls through to a normal download
+			// below, silently -- a broken cache entry should only
+			// ever cost the optimization, never the install itself.
+		}
+	}
+	if archivePath == "" {
+		archivePath, err = downloadWithRetry(ctx, opts)
+		if err != nil {
+			return err
+		}
+		if opts.CacheDir != "" {
+			saveToCache(opts, archivePath) // best-effort; see its own doc comment
+		}
 	}
 	defer os.Remove(archivePath)
 
@@ -410,6 +460,12 @@ func runWithThresholdedProgress(threshold time.Duration, onSlow func(), work fun
 // download into a brand new temp file -- see the package doc.
 func downloadWithRetry(ctx context.Context, opts Options) (string, error) {
 	var lastErr error
+	// Path to a partial download worth resuming from, "" if none --
+	// carried across retry attempts within this same call. Cleaned up
+	// on any path that returns without a successful final download,
+	// so a genuinely unresumable failure never leaves a stray temp
+	// file behind, matching the ORIGINAL behavior's own guarantee.
+	var resumePath string
 
 	for attempt := 1; attempt <= opts.MaxAttempts; attempt++ {
 		if attempt > 1 {
@@ -417,6 +473,9 @@ func downloadWithRetry(ctx context.Context, opts Options) (string, error) {
 			select {
 			case <-time.After(opts.RetryDelay):
 			case <-ctx.Done():
+				if resumePath != "" {
+					os.Remove(resumePath)
+				}
 				return "", ctx.Err()
 			}
 		}
@@ -426,77 +485,289 @@ func downloadWithRetry(ctx context.Context, opts Options) (string, error) {
 		// as part of its own first render, so the announcement and the
 		// bar are one line, not two.
 
-		path, err := downloadOnce(ctx, opts)
+		path, nextResumePath, err := downloadOnce(ctx, opts, resumePath)
 		if err == nil {
 			return path, nil
 		}
+		resumePath = nextResumePath
 		lastErr = err
 	}
 
+	if resumePath != "" {
+		os.Remove(resumePath)
+	}
 	return "", fmt.Errorf("installer: download failed after %d attempts: %w", opts.MaxAttempts, lastErr)
 }
 
-// downloadOnce performs exactly one fresh download attempt into a new
-// temp file, verifying its checksum before returning. On ANY failure
-// (network error or checksum mismatch), the partial/incorrect temp
-// file is removed before returning -- nothing is ever left behind for
-// a later attempt to accidentally reuse.
-func downloadOnce(ctx context.Context, opts Options) (string, error) {
+// downloadOnce performs one download attempt, verifying the result's
+// checksum before returning. resumePath, if non-empty, names a
+// partial file from a PRIOR failed attempt worth resuming from via an
+// HTTP Range request -- pass "" for a completely fresh attempt (the
+// ONLY thing the very first attempt of any download ever does, so
+// that specific call shape, and everything it does, is byte-for-byte
+// identical to how this function worked before resume support
+// existed at all).
+//
+// Returns (path, "", nil) on success. On failure, returns ("",
+// resumableAt, err) -- resumableAt names a partial file worth passing
+// to the NEXT attempt's resumePath (empty if there's nothing worth
+// resuming: the server doesn't support ranges, or the completed file
+// was simply WRONG, not partial, e.g. a checksum mismatch).
+//
+// A real, deliberate design choice worth calling out: hash.Hash has
+// no portable way to save/restore its internal state ACROSS a brand
+// new http.Request/response cycle (the two connections are entirely
+// unrelated as far as the hasher is concerned) -- so rather than
+// attempt anything fragile there, a resumed attempt simply re-reads
+// the bytes ALREADY on disk through a fresh hasher once, before
+// appending anything new. Simple, always correct, and the extra read
+// is negligible next to the network time already saved by not
+// re-downloading those same bytes.
+func downloadOnce(ctx context.Context, opts Options, resumePath string) (path string, resumableAt string, err error) {
+	var startOffset int64
+	if resumePath != "" {
+		if info, statErr := os.Stat(resumePath); statErr == nil {
+			startOffset = info.Size()
+		} else {
+			// The partial file is gone (deleted out from under us,
+			// or never existed) -- fall back to starting fresh,
+			// rather than failing outright over something recoverable.
+			resumePath = ""
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opts.URL, nil)
 	if err != nil {
-		return "", fmt.Errorf("building request: %w", err)
+		return "", "", fmt.Errorf("building request: %w", err)
+	}
+	if startOffset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startOffset))
 	}
 
 	resp, err := opts.client().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		// A genuine network-level failure before any response at all
+		// -- the partial file, if any, is untouched and still good to
+		// resume from on the next attempt.
+		return "", resumePath, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
+	var f *os.File
+	var hasher hash.Hash
+	var finalPath string
 
-	f, err := os.CreateTemp(opts.TempRoot, "download-*")
-	if err != nil {
-		return "", fmt.Errorf("creating temp file: %w", err)
+	if startOffset > 0 && resp.StatusCode == http.StatusPartialContent {
+		// The server genuinely honored the Range request -- resume
+		// for real: append to the existing partial file, having first
+		// rebuilt the hasher's state from what's already on disk (see
+		// this function's own doc comment for why that's done this
+		// way rather than trying to persist hash state directly).
+		f, err = os.OpenFile(resumePath, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return "", "", fmt.Errorf("reopening partial download: %w", err)
+		}
+		finalPath = resumePath
+		hasher = newHasher(opts.checksumAlgorithm())
+		existing, openErr := os.Open(resumePath)
+		if openErr != nil {
+			f.Close()
+			return "", "", fmt.Errorf("reopening partial download for hashing: %w", openErr)
+		}
+		_, hashErr := io.Copy(hasher, existing)
+		existing.Close()
+		if hashErr != nil {
+			f.Close()
+			return "", "", fmt.Errorf("rehashing partial download: %w", hashErr)
+		}
+	} else {
+		// Either a genuinely fresh attempt (resumePath == ""), or the
+		// server didn't honor the Range request (some servers/CDNs
+		// don't support it at all, and correctly respond 200 with the
+		// full body instead of 206) -- either way, start completely
+		// from scratch. Any stale partial file is discarded outright,
+		// never silently mixed with a full-content response starting
+		// over from byte zero.
+		if resumePath != "" {
+			os.Remove(resumePath)
+			startOffset = 0
+		}
+		if resp.StatusCode != http.StatusOK {
+			return "", "", fmt.Errorf("unexpected status %d", resp.StatusCode)
+		}
+		f, err = os.CreateTemp(opts.TempRoot, "download-*")
+		if err != nil {
+			return "", "", fmt.Errorf("creating temp file: %w", err)
+		}
+		finalPath = f.Name()
+		hasher = newHasher(opts.checksumAlgorithm())
 	}
-	path := f.Name()
 
 	// resp.ContentLength is -1 when the server didn't report a size
 	// (e.g. chunked transfer encoding) -- progressReader passes that
 	// straight through so the caller can detect it and omit a
 	// percentage rather than showing something nonsensical.
+	//
+	// total/read are adjusted for a genuinely resumed request so
+	// progress reflects the FULL file (bytes already on disk plus
+	// what's left to fetch), not just this one response's own
+	// remaining byte count starting back over from zero.
+	total := resp.ContentLength
+	if startOffset > 0 && resp.StatusCode == http.StatusPartialContent && total >= 0 {
+		total += startOffset
+	}
 	var body io.Reader = resp.Body
 	if opts.DownloadProgress != nil {
 		body = &progressReader{
 			r:        resp.Body,
-			total:    resp.ContentLength,
+			total:    total,
+			read:     startOffset,
 			onUpdate: opts.DownloadProgress,
 		}
 	}
 
-	hasher := newHasher(opts.checksumAlgorithm())
 	_, copyErr := io.Copy(io.MultiWriter(f, hasher), body)
 	closeErr := f.Close()
 
 	if copyErr != nil {
-		os.Remove(path)
-		return "", fmt.Errorf("downloading body: %w", copyErr)
+		// A genuine network-level failure mid-stream -- the
+		// (now-longer) partial file is still good, worth resuming
+		// from on the next attempt.
+		return "", finalPath, fmt.Errorf("downloading body: %w", copyErr)
 	}
 	if closeErr != nil {
-		os.Remove(path)
-		return "", fmt.Errorf("closing temp file: %w", closeErr)
+		return "", finalPath, fmt.Errorf("closing temp file: %w", closeErr)
 	}
 
 	got := hex.EncodeToString(hasher.Sum(nil))
 	want := strings.ToLower(opts.Checksum)
 	if got != want {
-		os.Remove(path)
-		return "", fmt.Errorf("checksum mismatch (%s): expected %s, got %s", opts.checksumAlgorithm(), want, got)
+		// The file IS complete, but simply wrong -- nothing "partial"
+		// about it to resume, so it's discarded outright, matching
+		// the exact original behavior for this specific failure case.
+		os.Remove(finalPath)
+		return "", "", fmt.Errorf("checksum mismatch (%s): expected %s, got %s", opts.checksumAlgorithm(), want, got)
 	}
 
-	return path, nil
+	return finalPath, "", nil
+}
+
+// cacheFileName returns the filename a given archive is stored under
+// in the cache -- keyed by CHECKSUM, not URL, since the checksum is
+// the one thing guaranteed to uniquely identify "this exact archive's
+// content" regardless of how a URL might vary (a redirect, a mirror,
+// a differently-formatted version string). The real extension is
+// preserved so a cache hit's copy still carries a Filename
+// extractorFor can correctly dispatch on.
+func cacheFileName(opts Options) string {
+	ext := ".tar.gz"
+	if strings.HasSuffix(opts.Filename, ".zip") {
+		ext = ".zip"
+	}
+	return strings.ToLower(opts.Checksum) + ext
+}
+
+// checkCache looks for a previously-cached copy of this exact archive
+// (by checksum), returning its path if found AND its checksum still
+// genuinely verifies against opts.Checksum.
+//
+// A checksum mismatch here means the cached file is stale or
+// corrupted -- it is REMOVED outright, never merely reported, and
+// treated exactly the same as "not cached at all" from the caller's
+// perspective. This is the specific design choice that avoids the
+// class of bug this package's own top-level comment documents real,
+// cited instances of in both SDKMAN and Homebrew: a bad cache entry
+// here can only ever cost the download-skipping optimization on this
+// one install, never silently block it, and never persist as a
+// permanently-broken entry that keeps failing the same way on every
+// future install of this same version.
+func checkCache(opts Options) (string, bool) {
+	path := filepath.Join(opts.CacheDir, cacheFileName(opts))
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+
+	hasher := newHasher(opts.checksumAlgorithm())
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", false
+	}
+	got := hex.EncodeToString(hasher.Sum(nil))
+	if got != strings.ToLower(opts.Checksum) {
+		os.Remove(path)
+		return "", false
+	}
+	return path, true
+}
+
+// saveToCache copies a freshly-downloaded, ALREADY checksum-verified
+// archive into the cache for future reuse. Best-effort throughout:
+// any failure here (can't create the cache directory, disk full,
+// whatever) is silently ignored -- caching is purely an optimization
+// layered on top of an install that has, by the time this is called,
+// already fully succeeded on its own merits, and a failure to cache
+// must never fail, or even visibly warn about, that real success.
+func saveToCache(opts Options, downloadedPath string) {
+	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
+		return
+	}
+	src, err := os.Open(downloadedPath)
+	if err != nil {
+		return
+	}
+	defer src.Close()
+
+	tmp, err := os.CreateTemp(opts.CacheDir, "caching-*")
+	if err != nil {
+		return
+	}
+	if _, err := io.Copy(tmp, src); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return
+	}
+	// Atomic rename into place -- a concurrent `sk install` of the
+	// SAME version (unlikely, but not impossible) never observes a
+	// partially-written cache file.
+	dst := filepath.Join(opts.CacheDir, cacheFileName(opts))
+	if err := os.Rename(tmp.Name(), dst); err != nil {
+		os.Remove(tmp.Name())
+	}
+}
+
+// copyToTemp copies src into a new, uniquely-named temp file inside
+// dir, returning its path. Used specifically so a cache hit always
+// extracts from (and Install's own deferred cleanup always removes)
+// an independent COPY, never the cache's own file directly -- a cache
+// hit must never be destructive to the cache itself, or every version
+// would only ever be usable once before needing a fresh download
+// again anyway, defeating the entire point of caching it at all.
+func copyToTemp(dir, src string) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+
+	out, err := os.CreateTemp(dir, "download-*")
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(out.Name())
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(out.Name())
+		return "", err
+	}
+	return out.Name(), nil
 }
 
 // extractor is the shape shared by extractTarGz and extractZip --

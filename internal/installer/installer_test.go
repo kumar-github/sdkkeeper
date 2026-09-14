@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -394,6 +395,280 @@ func TestInstall_ChecksumMismatch_ExhaustsRetries(t *testing.T) {
 	// empty directory.
 	if _, err := os.Stat(tempRoot); !os.IsNotExist(err) {
 		t.Errorf("expected TempRoot itself to be removed after exhausting retries, but Stat returned: %v", err)
+	}
+}
+
+// TestDownloadWithRetry_ResumesAfterMidStreamFailure is the core
+// resume-support test: the first attempt is cut off deliberately
+// partway through (a real http.Hijacker close, simulating a genuine
+// network drop -- not just an error response), and the SECOND attempt
+// is confirmed to send a real Range header and receive only the
+// REMAINING bytes back (a 206 response) -- proving the download
+// genuinely resumed rather than starting over, and that the final,
+// reassembled file's checksum is still correct (proving the
+// rebuilt-hasher approach -- see downloadOnce's own doc comment for
+// why it works this way -- is genuinely sound, not just plausible).
+func TestDownloadWithRetry_ResumesAfterMidStreamFailure(t *testing.T) {
+	full := make([]byte, 200_000)
+	for i := range full {
+		full[i] = byte(i % 251)
+	}
+	sum := sha256.Sum256(full)
+	checksum := hex.EncodeToString(sum[:])
+
+	var requestCount int
+	var sawRangeHeader string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			// First attempt: write only the first half, then abruptly
+			// close the underlying connection -- a real, low-level
+			// cutoff (not a clean error response), matching what an
+			// actual network drop mid-download looks like to the
+			// client: a body that ends before Content-Length says it
+			// should.
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(full)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(full[:100_000])
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("test server does not support hijacking")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatalf("hijack failed: %v", err)
+			}
+			conn.Close()
+			return
+		}
+
+		// Second attempt: must be a genuine Range request, and only
+		// the REMAINING bytes are sent back with 206 -- if the first
+		// attempt's partial file were being silently discarded and
+		// restarted, this branch would never be reached at all with
+		// a Range header present.
+		sawRangeHeader = r.Header.Get("Range")
+		if sawRangeHeader != "bytes=100000-" {
+			t.Errorf("expected Range: bytes=100000-, got %q", sawRangeHeader)
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 100000-%d/%d", len(full)-1, len(full)))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(full[100_000:])
+	}))
+	defer server.Close()
+
+	tmpRoot := t.TempDir()
+	targetDir := filepath.Join(tmpRoot, "candidates", "java", "JDK-21.0.2")
+	err := Install(context.Background(), Options{
+		URL:         server.URL,
+		Filename:    "archive.tar.gz",
+		Checksum:    checksum,
+		TargetDir:   targetDir,
+		TempRoot:    filepath.Join(tmpRoot, "tmp"),
+		MaxAttempts: 3,
+		RetryDelay:  10 * time.Millisecond,
+	})
+	// The archive isn't a real tar.gz, so extraction will fail --
+	// this test is specifically about the DOWNLOAD succeeding with a
+	// correct checksum, not the full install pipeline. A checksum
+	// failure would show up as "checksum mismatch"; anything else
+	// (extraction failing on non-tar.gz content) is expected here.
+	if err != nil && strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("resumed download produced the WRONG final checksum: %v", err)
+	}
+	if requestCount != 2 {
+		t.Errorf("expected exactly 2 requests (1 failed + 1 resumed), got %d", requestCount)
+	}
+	if sawRangeHeader == "" {
+		t.Error("expected the second request to include a Range header -- resume never actually happened")
+	}
+}
+
+// TestDownloadWithRetry_FallsBackToFreshWhenServerIgnoresRange is a
+// regression test for a real, deliberately-handled edge case: not
+// every server/CDN honors Range requests. If the server responds 200
+// (full content) instead of 206 even after a Range header was sent,
+// the download must fall back to a clean, full restart -- NOT
+// silently append the full response onto the existing partial file,
+// which would corrupt the result (duplicated leading bytes).
+func TestDownloadWithRetry_FallsBackToFreshWhenServerIgnoresRange(t *testing.T) {
+	full := make([]byte, 50_000)
+	for i := range full {
+		full[i] = byte(i % 233)
+	}
+	sum := sha256.Sum256(full)
+	checksum := hex.EncodeToString(sum[:])
+
+	var requestCount int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(full)))
+			w.WriteHeader(http.StatusOK)
+			w.Write(full[:20_000])
+			hj, _ := w.(http.Hijacker)
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+			return
+		}
+		// Ignores any Range header entirely -- always sends the FULL
+		// body with a plain 200, exactly like a server/CDN with no
+		// range support at all.
+		w.WriteHeader(http.StatusOK)
+		w.Write(full)
+	}))
+	defer server.Close()
+
+	tmpRoot := t.TempDir()
+	targetDir := filepath.Join(tmpRoot, "candidates", "java", "JDK-21.0.2")
+	err := Install(context.Background(), Options{
+		URL:         server.URL,
+		Filename:    "archive.tar.gz",
+		Checksum:    checksum,
+		TargetDir:   targetDir,
+		TempRoot:    filepath.Join(tmpRoot, "tmp"),
+		MaxAttempts: 3,
+		RetryDelay:  10 * time.Millisecond,
+	})
+	if err != nil && strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("fallback-to-fresh download produced the WRONG final checksum (likely corrupted by appending onto stale partial content): %v", err)
+	}
+}
+
+// TestInstall_CacheDir_MissThenHit is the core cache-support test:
+// the FIRST install with a given CacheDir genuinely downloads (the
+// server is hit), and a SECOND install of the exact same
+// URL/checksum, into a DIFFERENT TargetDir, does NOT hit the server
+// again at all -- proving the cache is genuinely consulted, not just
+// present but unused.
+func TestInstall_CacheDir_MissThenHit(t *testing.T) {
+	archive, checksum := buildTarGz(t, "jdk-21.0.2", map[string]string{"bin/java": "fake binary"})
+
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Write(archive)
+	}))
+	defer server.Close()
+
+	tmpRoot := t.TempDir()
+	cacheDir := filepath.Join(tmpRoot, "cache")
+	tempRoot := filepath.Join(tmpRoot, "tmp")
+
+	install := func(targetDir string) error {
+		return Install(context.Background(), Options{
+			URL:       server.URL,
+			Filename:  "archive.tar.gz",
+			Checksum:  checksum,
+			TargetDir: targetDir,
+			TempRoot:  tempRoot,
+			CacheDir:  cacheDir,
+		})
+	}
+
+	if err := install(filepath.Join(tmpRoot, "candidates", "java", "JDK-first")); err != nil {
+		t.Fatalf("first install (cache miss) failed: %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected exactly 1 request after the first install, got %d", requestCount)
+	}
+
+	if err := install(filepath.Join(tmpRoot, "candidates", "java", "JDK-second")); err != nil {
+		t.Fatalf("second install (expected cache hit) failed: %v", err)
+	}
+	if requestCount != 1 {
+		t.Errorf("expected STILL exactly 1 request after the second install (cache hit expected), got %d -- the cache was not actually used", requestCount)
+	}
+
+	// Confirm the second install's content is genuinely correct, not
+	// just "no network call happened" -- a real file, correctly
+	// extracted from the cached copy.
+	if _, err := os.Stat(filepath.Join(tmpRoot, "candidates", "java", "JDK-second", "bin", "java")); err != nil {
+		t.Errorf("expected the cache-hit install to have genuinely extracted real content: %v", err)
+	}
+}
+
+// TestInstall_CacheDir_CorruptedEntryFallsBackToDownload is a
+// regression test for the exact class of bug this package's own
+// top-level comment documents real, cited instances of (SDKMAN
+// sdkman-cli#1005, several Homebrew issues): a stale or corrupted
+// cache entry must never permanently block an install -- it's
+// discarded and a fresh download happens instead, silently.
+func TestInstall_CacheDir_CorruptedEntryFallsBackToDownload(t *testing.T) {
+	archive, checksum := buildTarGz(t, "jdk-21.0.2", map[string]string{"bin/java": "fake binary"})
+
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Write(archive)
+	}))
+	defer server.Close()
+
+	tmpRoot := t.TempDir()
+	cacheDir := filepath.Join(tmpRoot, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	// A corrupted "cache entry" for this exact checksum -- wrong
+	// content entirely, simulating disk corruption or a genuinely
+	// stale/tampered file.
+	corruptedPath := filepath.Join(cacheDir, checksum+".tar.gz")
+	if err := os.WriteFile(corruptedPath, []byte("not a real archive at all"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	err := Install(context.Background(), Options{
+		URL:       server.URL,
+		Filename:  "archive.tar.gz",
+		Checksum:  checksum,
+		TargetDir: filepath.Join(tmpRoot, "candidates", "java", "JDK-21.0.2"),
+		TempRoot:  filepath.Join(tmpRoot, "tmp"),
+		CacheDir:  cacheDir,
+	})
+	if err != nil {
+		t.Fatalf("expected install to succeed by falling back to a real download, got: %v", err)
+	}
+	if requestCount != 1 {
+		t.Errorf("expected the corrupted cache entry to be discarded and a real download to happen, got %d requests", requestCount)
+	}
+}
+
+// TestInstall_NoCacheDir_UnaffectedByCacheLogic confirms the
+// zero-value, default case (no caller sets CacheDir at all --
+// matching every OTHER test in this file) behaves EXACTLY as it did
+// before caching existed: a plain, uncached install, every time.
+func TestInstall_NoCacheDir_UnaffectedByCacheLogic(t *testing.T) {
+	archive, checksum := buildTarGz(t, "jdk-21.0.2", map[string]string{"bin/java": "fake binary"})
+
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Write(archive)
+	}))
+	defer server.Close()
+
+	tmpRoot := t.TempDir()
+	install := func(targetDir string) error {
+		return Install(context.Background(), Options{
+			URL:       server.URL,
+			Filename:  "archive.tar.gz",
+			Checksum:  checksum,
+			TargetDir: targetDir,
+			TempRoot:  filepath.Join(tmpRoot, "tmp"),
+			// CacheDir deliberately left unset.
+		})
+	}
+
+	if err := install(filepath.Join(tmpRoot, "candidates", "java", "JDK-first")); err != nil {
+		t.Fatalf("first install failed: %v", err)
+	}
+	if err := install(filepath.Join(tmpRoot, "candidates", "java", "JDK-second")); err != nil {
+		t.Fatalf("second install failed: %v", err)
+	}
+	if requestCount != 2 {
+		t.Errorf("expected 2 real downloads with no CacheDir set (no caching should happen at all), got %d", requestCount)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -158,6 +159,7 @@ func newInstallCmd() *cobra.Command {
 			// avoids a second, redundant size lookup once the
 			// download is already done.
 			var downloadedBytes int64
+			var downloadStart time.Time
 
 			err = installer.Install(ctx, installer.Options{
 				URL:               asset.URL,
@@ -166,10 +168,14 @@ func newInstallCmd() *cobra.Command {
 				ChecksumAlgorithm: asset.ChecksumAlgorithm,
 				TargetDir:         targetDir,
 				TempRoot:          tooldef.TempRoot(),
+				CacheDir:          tooldef.CacheRoot(),
 				Progress: func(msg string) {
 					fmt.Fprintln(session.Out, styles.Detail.Render(msg))
 				},
 				DownloadProgress: func(read, total int64, final bool) {
+					if downloadStart.IsZero() {
+						downloadStart = time.Now()
+					}
 					if final {
 						downloadedBytes = read
 					}
@@ -194,7 +200,7 @@ func newInstallCmd() *cobra.Command {
 					if final {
 						prefix = "Download complete "
 					}
-					line := prefix + renderDownloadProgress(read, total)
+					line := prefix + renderDownloadProgress(read, total, time.Since(downloadStart))
 					if session.HasTTY {
 						// Redraw in place: \r returns to column 0,
 						// \033[K erases anything left over from a

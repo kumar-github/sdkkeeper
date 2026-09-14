@@ -25,6 +25,21 @@ func TempRoot() string {
 	return filepath.Join(home, ".sdkkeeper", "tmp")
 }
 
+// CacheRoot is ~/.sdkkeeper/cache -- persistent storage for
+// successfully-downloaded, checksum-verified archives, reused across
+// installs of the same exact version (see installer.Options.CacheDir's
+// own doc comment for the full design). Deliberately a SEPARATE
+// directory from TempRoot, not a subdirectory of it: TempRoot is
+// explicitly ephemeral scratch space, cleaned up as part of a normal
+// install (see Install's own empty-directory cleanup); CacheRoot's
+// whole purpose is to persist ACROSS installs, so conflating the two
+// risked a future TempRoot cleanup accidentally sweeping up cached
+// archives it was never meant to touch.
+func CacheRoot() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".sdkkeeper", "cache")
+}
+
 // CandidateRoot returns the sdkkeeper-managed root for this tool, e.g.
 // ~/.sdkkeeper/candidates/java. Every version this tool knows about
 // lives directly under here -- either as a real directory (written by

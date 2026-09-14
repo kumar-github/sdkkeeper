@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"sdkkeeper/internal/term"
 	"sdkkeeper/internal/tooldef"
@@ -247,7 +248,7 @@ func TestFormatMB(t *testing.T) {
 }
 
 func TestRenderDownloadProgress_UnknownTotal(t *testing.T) {
-	line := renderDownloadProgress(1048576, -1)
+	line := renderDownloadProgress(1048576, -1, 0)
 	if line != "1.0 MB" {
 		t.Errorf("expected fallback text for unknown total, got: %q", line)
 	}
@@ -257,7 +258,7 @@ func TestRenderDownloadProgress_UnknownTotal(t *testing.T) {
 }
 
 func TestRenderDownloadProgress_KnownTotal(t *testing.T) {
-	line := renderDownloadProgress(50, 100)
+	line := renderDownloadProgress(50, 100, 0)
 	if !strings.Contains(line, "50%") {
 		t.Errorf("expected 50%% in output, got: %q", line)
 	}
@@ -270,7 +271,7 @@ func TestRenderDownloadProgress_FullBarAtCompletion(t *testing.T) {
 	// Large, realistic byte values -- avoids the byte-count text
 	// itself containing a decimal point (e.g. "0.0 MB") being
 	// mistaken for a bar-fill character when checking for "."
-	line := renderDownloadProgress(100*1024*1024, 100*1024*1024)
+	line := renderDownloadProgress(100*1024*1024, 100*1024*1024, 0)
 	barStart := strings.Index(line, "[")
 	barEnd := strings.Index(line, "]")
 	if barStart == -1 || barEnd == -1 {
@@ -288,9 +289,60 @@ func TestRenderDownloadProgress_FullBarAtCompletion(t *testing.T) {
 func TestRenderDownloadProgress_NeverExceedsBarWidth(t *testing.T) {
 	// A read count slightly exceeding total (possible with chunked
 	// encoding quirks) should never overflow the bar's fixed width.
-	line := renderDownloadProgress(105, 100)
+	line := renderDownloadProgress(105, 100, 0)
 	if strings.Count(line, "#") > 36 {
 		t.Errorf("expected filled bar segments to be capped at bar width, got: %q", line)
+	}
+}
+
+// TestRenderDownloadProgress_ShowsSpeedAndETAOnceMeasurable confirms
+// the new speed/ETA feature: once enough time has genuinely elapsed
+// to compute a rate, both a speed and an ETA appear alongside the bar.
+func TestRenderDownloadProgress_ShowsSpeedAndETAOnceMeasurable(t *testing.T) {
+	// 10 MB read in 2 real seconds -- a realistic, easily-verified
+	// rate (5 MB/s) with 90 MB remaining, giving an ETA in the
+	// several-second range.
+	line := renderDownloadProgress(10*1024*1024, 100*1024*1024, 2*time.Second)
+	if !strings.Contains(line, "MB/s") {
+		t.Errorf("expected a speed reading once elapsed time is genuinely measurable, got: %q", line)
+	}
+	if !strings.Contains(line, "ETA") {
+		t.Errorf("expected an ETA once both speed and a known total are available, got: %q", line)
+	}
+}
+
+// TestRenderDownloadProgress_NoSpeedBeforeMeasurable is the direct
+// safety-net test for the very first progress tick: with no
+// meaningful time elapsed yet, showing a "speed" would be either a
+// divide-by-zero or a meaningless, wildly inflated number -- neither
+// should ever reach the user.
+func TestRenderDownloadProgress_NoSpeedBeforeMeasurable(t *testing.T) {
+	line := renderDownloadProgress(1024, 100*1024*1024, 0)
+	if strings.Contains(line, "MB/s") {
+		t.Errorf("expected NO speed reading with zero elapsed time, got: %q", line)
+	}
+}
+
+// TestRenderDownloadProgress_NoETAWithUnknownTotal confirms speed
+// alone can still show even when total is unknown (there's a real
+// rate to report), but ETA correctly never does (there's no target
+// to estimate time "until").
+func TestRenderDownloadProgress_NoETAWithUnknownTotal(t *testing.T) {
+	line := renderDownloadProgress(10*1024*1024, -1, 2*time.Second)
+	if !strings.Contains(line, "MB/s") {
+		t.Errorf("expected a speed reading even with an unknown total, got: %q", line)
+	}
+	if strings.Contains(line, "ETA") {
+		t.Errorf("expected NO ETA with an unknown total, got: %q", line)
+	}
+}
+
+func TestFormatDuration_UnderAndOverAMinute(t *testing.T) {
+	if got := formatDuration(45); got != "45s" {
+		t.Errorf("formatDuration(45) = %q, want \"45s\"", got)
+	}
+	if got := formatDuration(127); got != "2m 7s" {
+		t.Errorf("formatDuration(127) = %q, want \"2m 7s\"", got)
 	}
 }
 

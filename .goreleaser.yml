@@ -93,16 +93,34 @@ homebrew_casks:
     # fixed at BUILD time on the GitHub Actions runner -- checking
     # $ZDOTDIR there would read the runner's own environment, not any
     # real user's. A real `caveats do ... end` block runs live, on the
-    # user's own machine, at their actual `brew install` time, so it
-    # can read $ZDOTDIR/$HOME for real and print the exact resolved
-    # path instead of a hedged "usually ~/.zshrc, but yours may differ".
+    # user's own machine, at their actual `brew install` time.
+    #
+    # Deliberately does NOT read ENV["ZDOTDIR"] directly -- confirmed
+    # directly, via a real test, that this doesn't work: ZDOTDIR is a
+    # zsh SHELL variable, and most dotfiles setups (including the one
+    # this was built for) set it WITHOUT `export`, since it only needs
+    # to be visible to zsh itself, not to child processes -- meaning
+    # it's invisible to this Ruby process entirely, and the check
+    # silently, always fell through to $HOME instead.
+    #
+    # Resolved instead by asking a real zsh subshell directly (`zsh -c
+    # 'print -r -- "${ZDOTDIR:-$HOME}/.zshrc"'`) -- zsh itself is the
+    # authoritative source for how it resolves its own ZDOTDIR
+    # (however it actually gets set: directly, conditionally, via a
+    # sourced file), so this asks it rather than trying to reimplement
+    # that resolution logic here. An earlier version of this comment
+    # said a subshell "wasn't reliable" here -- that conclusion was
+    # WRONG, traced back to a shell-escaping mistake in that specific
+    # test, not a genuine zsh limitation; confirmed directly, with
+    # this exact command, that it works correctly. $HOME is kept as a
+    # final fallback only for the genuinely rare case the subshell
+    # itself fails outright (zsh missing from PATH, or similar).
     custom_block: |
       name "SDK Keeper"
 
       caveats do
-        # zdotdir = ENV["ZDOTDIR"].to_s.empty? ? ENV["HOME"] : ENV["ZDOTDIR"]
-        # zshrc_path = "#{zdotdir}/.zshrc"
         zshrc_path = `zsh -c 'print -r -- "${ZDOTDIR:-$HOME}/.zshrc"' 2>/dev/null`.strip
+        zshrc_path = File.join(ENV["HOME"], ".zshrc") if zshrc_path.empty?
         <<~EOS
           SDK Keeper is installed. The command is `sk` (not sdkkeeper).
 
