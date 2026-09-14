@@ -118,6 +118,12 @@ homebrew_casks:
     custom_block: |
       name "SDK Keeper"
 
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/sk"]
+        end
+      end
+
       caveats do
         zshrc_path = `zsh -c 'print -r -- "${ZDOTDIR:-$HOME}/.zshrc"' 2>/dev/null`.strip
         zshrc_path = File.join(ENV["HOME"], ".zshrc") if zshrc_path.empty?
@@ -151,27 +157,52 @@ homebrew_casks:
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
-    # Required, not optional, given this project's own real state:
-    # confirmed directly from several other real projects needing the
-    # identical fix -- an unsigned, unnotarized macOS binary (which
-    # sk's own darwin builds are, with no Apple Developer certificate
-    # in this project at all) gets macOS's quarantine attribute set
-    # the moment Homebrew downloads it. Without stripping it here,
-    # EVERY macOS user hits "sk is damaged and can't be opened" on
-    # first run -- not a rare edge case, the default, unconditional
-    # outcome for every install.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/sk"]
-          end
-        # uninstall: |
-        #   system_command "/bin/echo", args: ["SDK Keeper has been removed."], print_stdout: true
-        #   system_command "/bin/echo", args: ["If you added the shell integration line to your shell config file, you may want to remove it too."], print_stdout: true
-        #   system_command "/bin/echo", args: ["If you forget, your next new shell will show something like:"], print_stdout: true
-        #   system_command "/bin/echo", args: [".zshrc:LINE: command not found: sk"], print_stdout: true
-        #   system_command "/bin/echo", args: ["That error is the sign -- go remove the block."], print_stdout: true
+    # No `hooks:` field here -- a real, live-reported severity
+    # escalation from earlier "leave it, it's cosmetic" guidance: the
+    # deprecation warning `hooks:` generates (old Ruby `postflight do`
+    # block) doesn't print once per install, it printed 14+ times on
+    # a single `brew tap`, before the user ever reaches `brew
+    # install` -- confirmed genuinely off-putting for a first-time
+    # user, not a minor cosmetic issue as originally assessed.
+    #
+    # Quarantine-strip moved into custom_block above instead, as a
+    # real `postflight_steps do ... end` block -- Homebrew's current,
+    # non-deprecated declarative DSL, confirmed working directly (not
+    # just documented): a real build's generated cask passes `ruby -c`
+    # syntax validation, and the {{staged_path}} token survives
+    # GoReleaser's OWN Go-template pass over custom_block intact (the
+    # doubled-brace `{{ "{{staged_path}}" }}` trick renders a LITERAL
+    # {{staged_path}} in the output -- confirmed by inspecting the
+    # actual generated file -- so Homebrew's own, separate templating
+    # sees the correct, un-mangled token when the cask actually runs).
+    #
+    # One real, known trade-off, not hidden: Homebrew's canonical
+    # stanza order expects postflight_steps AFTER the artifact
+    # stanzas (version/url/binary), but custom_block is placed at the
+    # TOP of the generated cask -- so `brew style`/`brew audit` would
+    # flag this as out of order. This does NOT block `brew
+    # tap`/`install`/`reinstall` (confirmed directly, and consistent
+    # with several other real projects that hit and fixed this exact
+    # warning the same way) -- it only affects a maintainer-side lint
+    # check, never anything an end user runs or sees.
+    #
+    # The proper, ordering-correct fix is GoReleaser natively emitting
+    # this stanza in the right position -- tracked upstream
+    # (goreleaser/goreleaser#6873, adding hooks.post.install_steps),
+    # unreleased as of this writing. Revisit and switch once that
+    # ships in a tagged release; this custom_block version is the
+    # right call in the meantime given how loud and immediate the
+    # deprecated version's warning already is.
+    #
+    # The uninstall-time message hook remains commented out below,
+    # unchanged from an earlier explicit choice -- could be similarly
+    # rewritten as uninstall_postflight_steps if wanted later.
+    # uninstall (old, deprecated Ruby form -- kept only for reference):
+    #   system_command "/bin/echo", args: ["SDK Keeper has been removed."], print_stdout: true
+    #   system_command "/bin/echo", args: ["If you added the shell integration line to your shell config file, you may want to remove it too."], print_stdout: true
+    #   system_command "/bin/echo", args: ["If you forget, your next new shell will show something like:"], print_stdout: true
+    #   system_command "/bin/echo", args: [".zshrc:LINE: command not found: sk"], print_stdout: true
+    #   system_command "/bin/echo", args: ["That error is the sign -- go remove the block."], print_stdout: true
 
 # ── Scoop (Windows) ──────────────────────────────────────────────
 # Same packaging repo as Homebrew above -- one external repo, not
