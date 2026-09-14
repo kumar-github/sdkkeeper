@@ -102,7 +102,7 @@ homebrew_casks:
       caveats do
         # zdotdir = ENV["ZDOTDIR"].to_s.empty? ? ENV["HOME"] : ENV["ZDOTDIR"]
         # zshrc_path = "#{zdotdir}/.zshrc"
-        zshrc_path = `zsh -fc 'print -r -- "${ZDOTDIR:-$HOME}/.zshrc"' 2>/dev/null`.strip
+        zshrc_path = `zsh -c 'print -r -- "${ZDOTDIR:-$HOME}/.zshrc"' 2>/dev/null`.strip
         <<~EOS
           SDK Keeper is installed. The command is `sk` (not sdkkeeper).
 
