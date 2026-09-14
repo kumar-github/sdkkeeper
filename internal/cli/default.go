@@ -64,8 +64,8 @@ func newDefaultCmd() *cobra.Command {
 			// could collide with this, since every real one always
 			// carries a vendor suffix.
 			if value == "null" {
-				err := os.Remove(tool.DefaultPath())
-				if err != nil && !os.IsNotExist(err) {
+				err := clearDefaultFile(tool)
+				if err != nil {
 					fmt.Fprintln(session.Out)
 					fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 Could not clear default: %s", err)))
 					return err

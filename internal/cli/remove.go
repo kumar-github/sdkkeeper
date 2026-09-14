@@ -144,7 +144,7 @@ func newRemoveCmd() *cobra.Command {
 			// confusing "not found" error instead of a clear one.
 			clearedDefault := false
 			if stored, err := readDefault(tool); err == nil && stored == version {
-				if err := os.Remove(tool.DefaultPath()); err == nil || os.IsNotExist(err) {
+				if err := clearDefaultFile(tool); err == nil {
 					clearedDefault = true
 				}
 			}

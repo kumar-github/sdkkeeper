@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -251,4 +252,30 @@ func renderTable(rows [][]string, numCols int, width int, styleFunc func(row, co
 		t.Row(r...)
 	}
 	return t.String()
+}
+
+// clearDefaultFile removes tool's remembered-default-version file,
+// and -- if the shared defaults/ directory is now empty -- removes
+// that directory too, matching the same "clean up an empty scratch
+// directory rather than leave it as unexplained cruft" pattern
+// already used for TempRoot's own cleanup after an install. Two real
+// callers share this: `sk default <tool> null` (explicitly clearing
+// it) and `sk remove <tool> <version>` (implicitly clearing it when
+// the version being removed happened to be the default) -- both
+// should leave the SAME clean state behind, not just an empty file
+// with an orphaned parent directory nothing ever revisits.
+//
+// Returns nil if the file was already gone (os.IsNotExist) --
+// idempotent removal, matching what both existing call sites already
+// relied on from plain os.Remove before this helper existed.
+func clearDefaultFile(tool tooldef.Tool) error {
+	err := os.Remove(tool.DefaultPath())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	dir := filepath.Dir(tool.DefaultPath())
+	if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) == 0 {
+		os.Remove(dir)
+	}
+	return nil
 }

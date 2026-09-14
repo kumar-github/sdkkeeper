@@ -168,7 +168,6 @@ func newInstallCmd() *cobra.Command {
 				ChecksumAlgorithm: asset.ChecksumAlgorithm,
 				TargetDir:         targetDir,
 				TempRoot:          tooldef.TempRoot(),
-				CacheDir:          tooldef.CacheRoot(),
 				Progress: func(msg string) {
 					fmt.Fprintln(session.Out, styles.Detail.Render(msg))
 				},

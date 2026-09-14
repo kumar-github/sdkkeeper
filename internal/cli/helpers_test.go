@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"sdkkeeper/internal/inventory"
+	"sdkkeeper/internal/tooldef"
 )
 
 // captureStderr mirrors output_test.go's captureStdout, for
@@ -289,5 +290,91 @@ func TestIndentLines_DropsTrailingBlankLines(t *testing.T) {
 	want := "  a\n  b\n"
 	if got != want {
 		t.Errorf("indentLines(...) = %q, want %q -- trailing blank lines should be dropped, not indented", got, want)
+	}
+}
+
+// TestClearDefaultFile_RemovesEmptyDefaultsDir confirms both real
+// gaps this closes: the tool's own default file is removed, AND the
+// shared defaults/ directory is removed too once it's the last thing
+// left in it -- matching the same "don't leave an empty scratch
+// directory behind" pattern TempRoot's own cleanup already uses.
+func TestClearDefaultFile_RemovesEmptyDefaultsDir(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	tool, ok := tooldef.Get("java")
+	if !ok {
+		t.Fatal("java not registered")
+	}
+
+	defaultsDir := filepath.Dir(tool.DefaultPath())
+	if err := os.MkdirAll(defaultsDir, 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	if err := os.WriteFile(tool.DefaultPath(), []byte("21.0.2-temurin"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	if err := clearDefaultFile(tool); err != nil {
+		t.Fatalf("clearDefaultFile failed: %v", err)
+	}
+
+	if _, err := os.Stat(tool.DefaultPath()); !os.IsNotExist(err) {
+		t.Errorf("expected the default file itself to be gone, stat error: %v", err)
+	}
+	if _, err := os.Stat(defaultsDir); !os.IsNotExist(err) {
+		t.Errorf("expected the now-empty defaults/ directory to be removed too, stat error: %v", err)
+	}
+}
+
+// TestClearDefaultFile_KeepsDirWhenOtherToolsStillHaveDefaults
+// confirms the directory is only removed when it's genuinely empty --
+// another tool's own default file must survive untouched.
+func TestClearDefaultFile_KeepsDirWhenOtherToolsStillHaveDefaults(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	javaTool, ok := tooldef.Get("java")
+	if !ok {
+		t.Fatal("java not registered")
+	}
+	mavenTool, ok := tooldef.Get("maven")
+	if !ok {
+		t.Fatal("maven not registered")
+	}
+
+	defaultsDir := filepath.Dir(javaTool.DefaultPath())
+	if err := os.MkdirAll(defaultsDir, 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	if err := os.WriteFile(javaTool.DefaultPath(), []byte("21.0.2-temurin"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	if err := os.WriteFile(mavenTool.DefaultPath(), []byte("3.9.9"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	if err := clearDefaultFile(javaTool); err != nil {
+		t.Fatalf("clearDefaultFile failed: %v", err)
+	}
+
+	if _, err := os.Stat(defaultsDir); err != nil {
+		t.Errorf("expected defaults/ to still exist (maven's own default is still in it), stat error: %v", err)
+	}
+	if _, err := os.Stat(mavenTool.DefaultPath()); err != nil {
+		t.Errorf("expected maven's own default file to be untouched, stat error: %v", err)
+	}
+}
+
+func TestClearDefaultFile_AlreadyGoneIsNotAnError(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	tool, ok := tooldef.Get("java")
+	if !ok {
+		t.Fatal("java not registered")
+	}
+	if err := clearDefaultFile(tool); err != nil {
+		t.Errorf("expected no error clearing an already-nonexistent default, got: %v", err)
 	}
 }

@@ -17,18 +17,29 @@
 //     leaving an install that can never complete without manual
 //     intervention) and sdkman-cli#1005 / several Homebrew issues
 //     (stale or corrupted cached downloads confusing later attempts,
-//     with no automatic recovery). Both features were reconsidered
-//     and implemented later, specifically engineered to avoid those
-//     exact failure modes rather than risk repeating them:
-//     downloadOnce falls back to a clean, full restart the moment a
-//     server doesn't honor a Range request (confirmed directly, via
+//     with no automatic recovery). Both were later reconsidered and
+//     implemented, specifically engineered to avoid those exact
+//     failure modes: downloadOnce falls back to a clean, full restart
+//     the moment a server doesn't honor a Range request (confirmed
+//     directly, via
 //     TestDownloadWithRetry_FallsBackToFreshWhenServerIgnoresRange --
 //     never gets stuck retrying a range the server will never honor),
-//     and checkCache always re-verifies a cached entry's checksum
-//     before trusting it, discarding (never merely warning about) any
-//     entry that doesn't match -- a bad cache entry can only ever
-//     cost the optimization, never block an install the way the cited
-//     bugs did.
+//     and the (since-removed) cache always re-verified a cached
+//     entry's checksum before trusting it.
+//   - The download cache was REMOVED again after that, for a
+//     genuinely different reason than the one that kept it out
+//     originally: not a correctness bug, but real, accumulating disk
+//     usage with no visibility or cleanup -- every install of every
+//     version left a persistent, silently-growing copy behind, easily
+//     exceeding a gigabyte across a handful of JDKs, that the user had
+//     no way to see or reclaim. Weighed against how uncommon
+//     "reinstall the exact same version later" actually is for a tool
+//     whose own design encourages keeping multiple versions installed
+//     side by side rather than removing and re-fetching them, the
+//     trade-off didn't hold up. Resume support is unaffected by this
+//     and remains -- it's a different feature solving a different
+//     problem (a slow/flaky connection during ONE download), with no
+//     persistent state or disk-usage cost of its own.
 //   - Always verify the checksum, and retry on either a network
 //     failure OR a checksum mismatch -- matching Homebrew's own
 //     documented behavior ("--retry: Retry if downloading fails or
@@ -106,20 +117,6 @@ type Options struct {
 	// (os.Rename silently degrades to non-atomic copy+delete across
 	// filesystems on some platforms).
 	TempRoot string
-
-	// CacheDir, if non-empty, is where successfully-downloaded,
-	// checksum-verified archives are kept for reuse across installs --
-	// keyed by checksum (not URL), the one thing guaranteed to
-	// uniquely identify "this exact archive's content" regardless of
-	// how a URL might vary. Empty (the default for any existing
-	// caller that doesn't set it) disables caching entirely --
-	// Install behaves exactly as it always has. See checkCache's own
-	// doc comment for how a stale/corrupted cache entry is handled
-	// (discarded, never treated as an install-blocking error) --
-	// deliberately avoiding the exact class of bug the package's own
-	// top-level comment already documents real, cited instances of in
-	// both SDKMAN and Homebrew.
-	CacheDir string
 
 	// MaxAttempts is how many times to retry the download+verify cycle
 	// on failure (network error or checksum mismatch) before giving
@@ -281,36 +278,9 @@ func Install(ctx context.Context, opts Options) error {
 		}
 	}()
 
-	// A cache hit is checked BEFORE any download attempt -- if found
-	// and its checksum still genuinely verifies, this skips
-	// downloadWithRetry entirely. See checkCache's own doc comment
-	// for exactly how a stale/corrupted entry is handled (discarded,
-	// never an install-blocking error).
-	var archivePath string
-	if opts.CacheDir != "" {
-		if cachedPath, ok := checkCache(opts); ok {
-			// Copied into a FRESH temp file, never extracted from (or
-			// deleted from) the cache's own copy directly -- a cache
-			// hit must always be non-destructive to the cache itself,
-			// since this same defer below removes archivePath
-			// unconditionally once Install returns.
-			if copied, copyErr := copyToTemp(opts.TempRoot, cachedPath); copyErr == nil {
-				archivePath = copied
-				opts.progress("Using cached download")
-			}
-			// Any copy failure falls through to a normal download
-			// below, silently -- a broken cache entry should only
-			// ever cost the optimization, never the install itself.
-		}
-	}
-	if archivePath == "" {
-		archivePath, err = downloadWithRetry(ctx, opts)
-		if err != nil {
-			return err
-		}
-		if opts.CacheDir != "" {
-			saveToCache(opts, archivePath) // best-effort; see its own doc comment
-		}
+	archivePath, err := downloadWithRetry(ctx, opts)
+	if err != nil {
+		return err
 	}
 	defer os.Remove(archivePath)
 
@@ -650,124 +620,6 @@ func downloadOnce(ctx context.Context, opts Options, resumePath string) (path st
 	}
 
 	return finalPath, "", nil
-}
-
-// cacheFileName returns the filename a given archive is stored under
-// in the cache -- keyed by CHECKSUM, not URL, since the checksum is
-// the one thing guaranteed to uniquely identify "this exact archive's
-// content" regardless of how a URL might vary (a redirect, a mirror,
-// a differently-formatted version string). The real extension is
-// preserved so a cache hit's copy still carries a Filename
-// extractorFor can correctly dispatch on.
-func cacheFileName(opts Options) string {
-	ext := ".tar.gz"
-	if strings.HasSuffix(opts.Filename, ".zip") {
-		ext = ".zip"
-	}
-	return strings.ToLower(opts.Checksum) + ext
-}
-
-// checkCache looks for a previously-cached copy of this exact archive
-// (by checksum), returning its path if found AND its checksum still
-// genuinely verifies against opts.Checksum.
-//
-// A checksum mismatch here means the cached file is stale or
-// corrupted -- it is REMOVED outright, never merely reported, and
-// treated exactly the same as "not cached at all" from the caller's
-// perspective. This is the specific design choice that avoids the
-// class of bug this package's own top-level comment documents real,
-// cited instances of in both SDKMAN and Homebrew: a bad cache entry
-// here can only ever cost the download-skipping optimization on this
-// one install, never silently block it, and never persist as a
-// permanently-broken entry that keeps failing the same way on every
-// future install of this same version.
-func checkCache(opts Options) (string, bool) {
-	path := filepath.Join(opts.CacheDir, cacheFileName(opts))
-	f, err := os.Open(path)
-	if err != nil {
-		return "", false
-	}
-	defer f.Close()
-
-	hasher := newHasher(opts.checksumAlgorithm())
-	if _, err := io.Copy(hasher, f); err != nil {
-		return "", false
-	}
-	got := hex.EncodeToString(hasher.Sum(nil))
-	if got != strings.ToLower(opts.Checksum) {
-		os.Remove(path)
-		return "", false
-	}
-	return path, true
-}
-
-// saveToCache copies a freshly-downloaded, ALREADY checksum-verified
-// archive into the cache for future reuse. Best-effort throughout:
-// any failure here (can't create the cache directory, disk full,
-// whatever) is silently ignored -- caching is purely an optimization
-// layered on top of an install that has, by the time this is called,
-// already fully succeeded on its own merits, and a failure to cache
-// must never fail, or even visibly warn about, that real success.
-func saveToCache(opts Options, downloadedPath string) {
-	if err := os.MkdirAll(opts.CacheDir, 0o755); err != nil {
-		return
-	}
-	src, err := os.Open(downloadedPath)
-	if err != nil {
-		return
-	}
-	defer src.Close()
-
-	tmp, err := os.CreateTemp(opts.CacheDir, "caching-*")
-	if err != nil {
-		return
-	}
-	if _, err := io.Copy(tmp, src); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return
-	}
-	// Atomic rename into place -- a concurrent `sk install` of the
-	// SAME version (unlikely, but not impossible) never observes a
-	// partially-written cache file.
-	dst := filepath.Join(opts.CacheDir, cacheFileName(opts))
-	if err := os.Rename(tmp.Name(), dst); err != nil {
-		os.Remove(tmp.Name())
-	}
-}
-
-// copyToTemp copies src into a new, uniquely-named temp file inside
-// dir, returning its path. Used specifically so a cache hit always
-// extracts from (and Install's own deferred cleanup always removes)
-// an independent COPY, never the cache's own file directly -- a cache
-// hit must never be destructive to the cache itself, or every version
-// would only ever be usable once before needing a fresh download
-// again anyway, defeating the entire point of caching it at all.
-func copyToTemp(dir, src string) (string, error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return "", err
-	}
-	defer in.Close()
-
-	out, err := os.CreateTemp(dir, "download-*")
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(out.Name())
-		return "", err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(out.Name())
-		return "", err
-	}
-	return out.Name(), nil
 }
 
 // extractor is the shape shared by extractTarGz and extractZip --
