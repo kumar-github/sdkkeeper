@@ -42,10 +42,10 @@ builds:
 
 archives:
   - id: sk-archive
-    formats: [ tar.gz ]
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
-        formats: [ zip ]
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
@@ -76,7 +76,7 @@ homebrew_casks:
     # above), and without this override the generated cask installs
     # it under the wrong name, breaking `sk <command>` entirely for
     # every real user immediately after install.
-    binaries: [ "sk" ]
+    binaries: ["sk"]
     repository:
       owner: kumar-github
       name: sdkkeeper-packaging
@@ -107,12 +107,7 @@ homebrew_casks:
 
           ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-          Add the below one line config to your shell config file. Based on your $ZDOTDIR/$HOME, that's:
-
-            #{zshrc_path}
-
-          (If you use a dotfiles manager that relocates this further, add it there instead.)
-          Add it at the end of the file, or next to any similar init lines you already have.
+          Add the below one line config at the end of your shell config file (#{zshrc_path}).
 
             # SDK Keeper
             eval "$(sk init zsh)"
