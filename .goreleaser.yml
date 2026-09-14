@@ -42,10 +42,10 @@ builds:
 
 archives:
   - id: sk-archive
-    formats: [tar.gz]
+    formats: [ tar.gz ]
     format_overrides:
       - goos: windows
-        formats: [zip]
+        formats: [ zip ]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
@@ -76,7 +76,7 @@ homebrew_casks:
     # above), and without this override the generated cask installs
     # it under the wrong name, breaking `sk <command>` entirely for
     # every real user immediately after install.
-    binaries: ["sk"]
+    binaries: [ "sk" ]
     repository:
       owner: kumar-github
       name: sdkkeeper-packaging
@@ -132,17 +132,27 @@ homebrew_casks:
 
       ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-      Add the below one line config to your shell config file (usually ~/.zshrc, but yours may live elsewhere -- e.g. inside a dotfiles setup).
+      Add the below one line config to your shell config file (usually `~/.zshrc`, but yours may live elsewhere -- e.g. inside a dotfiles setup).
       Add it at the end of the file, or next to any similar init lines you already have.
 
         # SDK Keeper
         eval "$(sk init zsh)"
 
-      Then restart your shell (or re-source whichever file you added it to -- again, that may not be ~/.zshrc).
+      Then restart your shell (or re-source whichever file you added it to -- again, that may or may not be `~/.zshrc`).
+
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Usage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+      Just type `sk` and hit enter. You will know what to do next.
 
       ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Cleanup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-      Remove that same block when uninstalling SDK Keeper.
+      1. Remove the below lines from the shell config file after uninstalling SDK Keeper.
+
+        # SDK Keeper
+        eval "$(sk init zsh)"
+
+      2. Delete the hidden `.sdkkeeper` folder from the user home directory (`~`).
+      Note: This is where all the downloaded JDKs and SDKs are stored and deleting them is permanant. You can keep them if you want to use later.
 
     commit_author:
       name: goreleaserbot
@@ -173,12 +183,12 @@ homebrew_casks:
           if OS.mac?
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/sk"]
           end
-        uninstall: |
-          system_command "/bin/echo", args: ["SDK Keeper has been removed."], print_stdout: true
-          system_command "/bin/echo", args: ["If you added the shell integration line to your shell config file, you may want to remove it too."], print_stdout: true
-          system_command "/bin/echo", args: ["If you forget, your next new shell will show something like:"], print_stdout: true
-          system_command "/bin/echo", args: ["  .zshrc:LINE: command not found: sk"], print_stdout: true
-          system_command "/bin/echo", args: ["That error is the sign -- go remove the block."], print_stdout: true
+        # uninstall: |
+        #   system_command "/bin/echo", args: ["SDK Keeper has been removed."], print_stdout: true
+        #   system_command "/bin/echo", args: ["If you added the shell integration line to your shell config file, you may want to remove it too."], print_stdout: true
+        #   system_command "/bin/echo", args: ["If you forget, your next new shell will show something like:"], print_stdout: true
+        #   system_command "/bin/echo", args: [".zshrc:LINE: command not found: sk"], print_stdout: true
+        #   system_command "/bin/echo", args: ["That error is the sign -- go remove the block."], print_stdout: true
 
 # ── Scoop (Windows) ──────────────────────────────────────────────
 # Same packaging repo as Homebrew above -- one external repo, not
