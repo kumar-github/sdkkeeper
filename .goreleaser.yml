@@ -115,6 +115,19 @@ homebrew_casks:
     # this exact command, that it works correctly. $HOME is kept as a
     # final fallback only for the genuinely rare case the subshell
     # itself fails outright (zsh missing from PATH, or similar).
+    #
+    # Nushell resolved differently, and more simply: no path is
+    # computed here in Ruby at all. Nushell's own vendor/autoload
+    # directory (anything placed in $nu.data-dir/vendor/autoload/) is
+    # auto-loaded at every session start, with no config.nu edit
+    # required -- confirmed as the actual, real-world convention in
+    # use (an earlier version of this file assumed the zsh-style
+    # "generate a script, then manually add a source line to the
+    # config file" pattern instead; that was wrong for Nushell
+    # specifically and has been corrected). The one-line setup command
+    # itself resolves $nu.data-dir live, in the user's own Nushell
+    # session when they run it -- so there's nothing for this Ruby
+    # caveats block to compute or get wrong.
     custom_block: |
       name "SDK Keeper"
 
@@ -127,11 +140,13 @@ homebrew_casks:
       caveats do
         zshrc_path = `zsh -c 'print -r -- "${ZDOTDIR:-$HOME}/.zshrc"' 2>/dev/null`.strip
         zshrc_path = File.join(ENV["HOME"], ".zshrc") if zshrc_path.empty?
+
         <<~EOS
           SDK Keeper is installed. The command is `sk` (not sdkkeeper).
 
           ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Setup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+          zsh:
           Add the below block at the end of your shell config file (#{zshrc_path}).
 
             # SDK Keeper
@@ -139,16 +154,29 @@ homebrew_casks:
 
           Then restart your shell (or re-source that same file).
 
+          Nushell:
+          Run the below line once.
+
+            sk init nu | save -f ($nu.data-dir | path join "vendor/autoload/sk.nu")
+
+          Then restart Nushell.
+
+          Note: Nushell auto-loads any script placed in its `vendor/autoload` directory at startup, so no config file edit is needed.
+
           ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Usage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
           Just type `sk` and hit enter. You will know what to do next.
 
           ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Cleanup ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-          1. Remove the below block from your shell config file (#{zshrc_path}) after uninstalling SDK Keeper.
+          1. zsh: remove the below block from your shell config file (#{zshrc_path}) after uninstalling SDK Keeper.
 
             # SDK Keeper
             eval "$(sk init zsh)"
+
+          Nushell: delete the autoload script.
+
+            rm ($nu.data-dir | path join "vendor/autoload/sk.nu")
 
           2. Delete the hidden `.sdkkeeper` folder from the user home directory (typically ~/.sdkkeeper).
           Note: This is where all the downloaded JDKs and SDKs are stored and deleting them is permanant. You can keep them if you want to use them later.
