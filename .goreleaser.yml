@@ -157,7 +157,7 @@ homebrew_casks:
           Nushell:
           Run the below line once.
 
-            sk init nu | save -f ($nu.data-dir | path join "vendor/autoload/sk.nu")
+            $ sk init nu | save -f ($nu.data-dir | path join "vendor/autoload/sk.nu")
 
           Then restart Nushell.
 
@@ -176,9 +176,12 @@ homebrew_casks:
 
           Nushell: delete the autoload script.
 
-            rm ($nu.data-dir | path join "vendor/autoload/sk.nu")
+            $ rm ($nu.data-dir | path join "vendor/autoload/sk.nu")
 
           2. Delete the hidden `.sdkkeeper` folder from the user home directory (typically ~/.sdkkeeper).
+
+            $ rm -rf ~/.sdkkeeper
+
           Note: This is where all the downloaded JDKs and SDKs are stored and deleting them is permanant. You can keep them if you want to use them later.
         EOS
       end
