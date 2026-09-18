@@ -126,6 +126,24 @@ assert_true() {
     fi
 }
 
+# assert_exit_code ACTUAL EXPECTED DESCRIPTION -- for --format=json's
+# own exit-code contract specifically (design doc §5: "all real
+# granularity lives in error.code strings, not exit codes" -- so this
+# checks the coarse table, error.code itself is still checked
+# separately via assert_contains against the envelope body).
+assert_exit_code() {
+    local actual="$1" expected="$2" description="$3"
+    CHECKS=$((CHECKS + 1))
+    if [[ "$actual" == "$expected" ]]; then
+        print "    ✓ PASS: $description"
+    else
+        print "    ✗ FAIL: $description"
+        print "      expected exit code: $expected"
+        print "      actual exit code:   $actual"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # --- other helpers ---------------------------------------------------
 
 section() {
@@ -186,6 +204,23 @@ export HOME="$TEST_HOME"
 export PATH="$SK_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 unset JAVA_HOME
 
+# A real, found gap: EVERY assertion below that captures sk's own
+# printed confirmation text (`out=$(sk ...)`) had only ever been
+# exercised in non-interactive environments (this project's CI,
+# sandboxed test runs) where /dev/tty genuinely isn't reachable at
+# all, so sk's already-correct os.Stderr fallback was the one being
+# captured the whole time. The FIRST run of this exact script on a
+# real, interactive terminal surfaced that /dev/tty IS reachable
+# there regardless of any shell-level capture technique (command
+# substitution, file redirection, piping) -- term.Open's own doc
+# comment explains why it's deliberately immune to exactly that. This
+# forces the SAME, already-correct fallback deliberately, on any
+# terminal, so this script's own assertions behave identically
+# whether run here, in CI, or on a real developer's own machine --
+# see term.Open's own doc comment in internal/term/tty.go for the
+# full mechanism.
+export SK_FORCE_NO_TTY=1
+
 # capture_sk CMD... -- runs the sk wrapper function DIRECTLY (never
 # inside a command-substitution subshell) so its internal `eval` (for
 # `use`/`remove`) genuinely mutates THIS shell's environment, exactly
@@ -210,6 +245,26 @@ capture_sk() {
     local tmpfile
     tmpfile=$(mktemp)
     sk "$@" > "$tmpfile" 2>&1
+    SK_OUT=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+}
+
+# capture_sk_direct CMD... -- runs $SK_BIN DIRECTLY, never through the
+# sk() wrapper function above. This is the deliberately CORRECT way to
+# exercise --format=json: its entire design point (see the design
+# doc's own §6/§7) is a non-interactive, direct-invocation contract
+# for scripts and agents -- explicitly NOT routed through the
+# interactive shell wrapper's own use/remove eval dispatch, which has
+# no awareness of --format=json at all (see the comment block right
+# after section O below for exactly what happens if the two ARE
+# combined -- a real, found gap, deliberately NOT exercised by this
+# helper). Leaves combined stdout+stderr in $SK_OUT and the real
+# process exit code in $SK_EXIT.
+capture_sk_direct() {
+    local tmpfile
+    tmpfile=$(mktemp)
+    "$SK_BIN" "$@" > "$tmpfile" 2>&1
+    SK_EXIT=$?
     SK_OUT=$(cat "$tmpfile")
     rm -f "$tmpfile"
 }
@@ -732,6 +787,177 @@ assert_true "$([[ -n "$java_idx" && -n "$gradle_idx" ]] && echo true || echo fal
 assert_true "$([[ "$java_idx" -lt "$gradle_idx" ]] && echo true || echo false)" \
     "Java's issue is reported BEFORE Gradle's (Java, Maven, Gradle order, not alphabetical)"
 rm -f "$TEST_HOME/.sdkkeeper/candidates/gradle/gradle-9.0.0" "$TEST_HOME/.sdkkeeper/candidates/java/JDK-dangling-test"
+
+# ════════════════════════════════════════════════════════════════
+section "O. --format=json -- the machine-readable contract (envelope shape, error.code, process exit codes)"
+# ════════════════════════════════════════════════════════════════
+# A representative subset of the design doc's own §10 test plan,
+# folded in here as real, end-to-end CLI invocations against the
+# ACTUAL BINARY -- distinct from (and a real-world complement to) the
+# unit-level Go tests in internal/cli/jsonformat_test.go and friends,
+# which exercise the same contract at the function level. Every
+# invocation here goes through capture_sk_direct, not the sk()
+# wrapper above -- see that helper's own doc comment for why.
+unset JAVA_HOME
+
+step "unknown tool -> ambiguous_tool, exit 104"
+capture_sk_direct --format=json current not-a-real-tool
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"status":"error"' "error envelope"
+assert_contains "$SK_OUT" '"code":"ambiguous_tool"' "error.code is ambiguous_tool"
+assert_exit_code "$SK_EXIT" "104" "process exit code 104"
+
+step "use with no version -> version_required, exit 101 (the picker can never launch under --format=json)"
+capture_sk_direct --format=json use java
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"code":"version_required"' "error.code is version_required"
+assert_exit_code "$SK_EXIT" "101" "process exit code 101"
+
+step "use a version that isn't installed -> not_found, exit 102"
+capture_sk_direct --format=json use java 99.0.0-temurin
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"code":"not_found"' "error.code is not_found"
+assert_exit_code "$SK_EXIT" "102" "process exit code 102"
+
+step "use --format=json reports activation, but correctly does NOT mutate this shell -- a report, not a shell action"
+fake_jdk "$CANDIDATES/JDK-21.0.2-temurin" "21.0.2-temurin"
+capture_sk_direct --format=json use java 21.0.2-temurin
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"status":"ok"' "success envelope"
+assert_contains "$SK_OUT" '"action":"activated"' "action is activated"
+assert_contains "$SK_OUT" '"vendor":"temurin"' "vendor correctly extracted from the suffix"
+assert_exit_code "$SK_EXIT" "0" "process exit code 0"
+assert_true "$([[ -z "${JAVA_HOME:-}" ]] && echo true || echo false)" \
+    "JAVA_HOME is genuinely UNCHANGED -- --format=json only reports what activation would do (design doc §6); a caller must export it itself"
+
+step "default + list + current agree once JAVA_HOME is exported the same way a real caller of --format=json would"
+capture_sk_direct --format=json default java 21.0.2-temurin
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"action":"defaulted"' "default set"
+
+capture_sk_direct --format=json list java
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"isDefault":true' "list agrees the version is now the default"
+assert_contains "$SK_OUT" '"isCurrent":false' "list correctly shows NOT current -- JAVA_HOME still unset at this point"
+
+export JAVA_HOME="$CANDIDATES/JDK-21.0.2-temurin"
+capture_sk_direct --format=json current java
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"version":"21.0.2-temurin"' "current now reports the exported version active"
+
+capture_sk_direct --format=json list java
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"isCurrent":true' "list.isCurrent now agrees with current.active -- the design doc §3 cross-command invariant, confirmed end to end through the real binary"
+unset JAVA_HOME
+
+step "remove --format=json genuinely deletes the real directory from disk, not just a reported action"
+capture_sk_direct --format=json remove java 21.0.2-temurin
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"action":"removed"' "action is removed"
+assert_exit_code "$SK_EXIT" "0" "process exit code 0"
+assert_true "$([[ ! -d "$CANDIDATES/JDK-21.0.2-temurin" ]] && echo true || echo false)" \
+    "the directory is genuinely gone from disk"
+
+step "remove --format=json reports wasCurrent/wasDefault -- a real, reported bug: it used to give a caller ZERO signal that the shell's own JAVA_HOME/default were now dangling"
+fake_jdk "$CANDIDATES/JDK-17.0.9-temurin" "17.0.9-temurin"
+capture_sk_direct --format=json default java 17.0.9-temurin
+export JAVA_HOME="$CANDIDATES/JDK-17.0.9-temurin"
+capture_sk_direct --format=json remove java 17.0.9-temurin
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"wasCurrent":true' "reports wasCurrent:true -- this exact version was JAVA_HOME"
+assert_contains "$SK_OUT" '"wasDefault":true' "reports wasDefault:true -- this exact version was the stored default"
+unset JAVA_HOME
+
+step "remove --format=json reports wasCurrent/wasDefault false when neither applies -- not a hardcoded true"
+fake_jdk "$CANDIDATES/JDK-11-temurin" "11-temurin"
+fake_jdk "$CANDIDATES/JDK-8-temurin" "8-temurin"
+export JAVA_HOME="$CANDIDATES/JDK-8-temurin"
+capture_sk_direct --format=json remove java 11-temurin
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"wasCurrent":false' "reports wasCurrent:false -- a DIFFERENT version was active"
+assert_contains "$SK_OUT" '"wasDefault":false' "reports wasDefault:false -- no default was ever set for this one"
+sk remove java 8-temurin >/dev/null 2>&1
+unset JAVA_HOME
+sk default java null >/dev/null 2>&1
+
+step "maven's Java prerequisite: version_required without JAVA_HOME, activates cleanly once it's set"
+unset JAVA_HOME
+fake_jdk "$TEST_HOME/.sdkkeeper/candidates/maven/apache-maven-3.9.9" "n/a"
+capture_sk_direct --format=json use maven 3.9.9
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"code":"version_required"' "no JDK selected -- version_required, not a picker"
+assert_exit_code "$SK_EXIT" "101" "process exit code 101"
+
+export JAVA_HOME="/some/dummy/jdk"
+capture_sk_direct --format=json use maven 3.9.9
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"action":"activated"' "activates cleanly once JAVA_HOME is set"
+assert_contains "$SK_OUT" '"vendor":null' "maven is single-vendor -- vendor is JSON null, never an empty string"
+assert_exit_code "$SK_EXIT" "0" "process exit code 0"
+unset JAVA_HOME
+
+step "an invalid --format value is a hard, immediate parse-time error -- stderr only, empty stdout, exit 1"
+bad_format_stdout=$(mktemp)
+bad_format_stderr=$(mktemp)
+"$SK_BIN" --format=bogus current java > "$bad_format_stdout" 2> "$bad_format_stderr"
+bad_format_exit=$?
+bad_format_stdout_content=$(cat "$bad_format_stdout")
+bad_format_stderr_content=$(cat "$bad_format_stderr")
+rm -f "$bad_format_stdout" "$bad_format_stderr"
+print "  stdout: ${bad_format_stdout_content:-<empty>}"
+print "  stderr: $bad_format_stderr_content"
+assert_exit_code "$bad_format_exit" "1" "process exit code 1 (the generic/internal_error slot -- this never reaches error.code at all, it's a parse-time flag rejection)"
+assert_equal "$bad_format_stdout_content" "" "stdout is completely empty -- nothing for a downstream JSON parser to choke on"
+assert_contains "$bad_format_stderr_content" "invalid argument" "the rejection goes to stderr, matching cobra's own unknown-flag reporting"
+
+step "doctor --format=json: a failing check still reports a SUCCESS envelope, but the PROCESS exits 201 -- a finding is not an invocation error (design doc §4)"
+mkdir -p "$CANDIDATES"
+ln -s "/nonexistent-json-doctor-target" "$CANDIDATES/JDK-dangling-json-test" 2>/dev/null
+capture_sk_direct --format=json doctor
+print -r -- "$SK_OUT" | head -3
+assert_contains "$SK_OUT" '"status":"ok"' "the envelope itself says status:ok even though a check failed"
+assert_not_contains "$SK_OUT" '"status":"error"' "never status:error for a mere finding"
+assert_not_contains "$SK_OUT" '"error"' "no \"error\" key at all in the envelope"
+assert_contains "$SK_OUT" '"dangling_registrations"' "the dangling_registrations check is present"
+assert_exit_code "$SK_EXIT" "201" "process exit code 201 -- success envelope, non-zero exit, the one command in this package where that combination is correct"
+rm -f "$CANDIDATES/JDK-dangling-json-test"
+
+# A real, found gap, deliberately NOT exercised as an automated
+# assertion above (see capture_sk_direct's own doc comment) -- every
+# check above calls $SK_BIN DIRECTLY, bypassing the sk() wrapper
+# function's own use/remove eval dispatch entirely, because that
+# dispatch (identical across all three real templates --
+# init.zsh.tmpl, init.nu.tmpl, init.ps1.tmpl -- see internal/shellhook/
+# templates/) decides whether to eval purely by checking if the FIRST
+# argument is literally "use" or "remove", with zero awareness that
+# --format=json exists at all:
+#   - `sk --format=json use java 21...` (flag BEFORE the subcommand)
+#     is safe: $1 is "--format=json", not "use", so the wrapper takes
+#     its plain `command sk "$@"` branch and --format=json's JSON
+#     reaches stdout untouched.
+#   - `sk use --format=json java 21...` (flag AFTER the subcommand) is
+#     NOT safe: $1 IS "use", so zsh's wrapper does
+#     `eval "$(command sk "$@")"` -- evaluating a raw JSON object as
+#     shell code. PowerShell's Invoke-Expression has the identical
+#     failure mode. Nushell's wrapper is worse and SILENT: it
+#     unconditionally appends its OWN `--shell-format=json` to every
+#     use/remove call regardless of what the user passed, and --format
+#     takes priority in the Go code, so the result is STILL a
+#     --format=json envelope -- which happens to also be valid JSON,
+#     so `$out | from json` never errors, but its
+#     schemaVersion/status/data keys get silently fed to `load-env` as
+#     if they were real activation env vars, with NO visible error and
+#     JAVA_HOME never actually set.
+# This is a real gap in design doc §8's "kept permanently separate"
+# decision: it accounts for the two flags never being CONFUSED with
+# each other by sk itself, but not for what a human typing at an
+# interactive shell -- using the wrapper function, not calling the sk
+# binary directly -- experiences when they combine the two. Left as a
+# documented, known finding rather than a red assertion here, since
+# fixing it means changing all three shell wrapper templates (a
+# separate, deliberate piece of work, not a byproduct of adding this
+# section) -- flagged to the user directly instead of silently patched
+# or silently ignored.
 
 # ════════════════════════════════════════════════════════════════
 section "Summary"

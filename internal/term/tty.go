@@ -82,8 +82,45 @@ type Session struct {
 // once, early (as close to the start of main as possible), before any
 // styles are built or any picker is shown -- see the package doc above
 // for exactly why the ordering matters.
+//
+// SK_FORCE_NO_TTY, if set to any non-empty value, skips the
+// openPlatformTTY attempt entirely and returns the same plain
+// os.Stderr/os.Stdin fallback Open already uses when no real terminal
+// is available. This exists SOLELY for scripts/sk-sequence-check.sh
+// (and any similar automated harness), never meant to be set by a
+// real user -- same "internal plumbing, not a real flag/setting"
+// category as --shell-format (see root.go). The problem it solves is
+// real and was found by actually running that script on a genuine
+// terminal for the first time: openPlatformTTY opens /dev/tty
+// directly (see tty_unix.go's own doc comment on why -- it's what
+// makes the eval-based shell wrapper safe in the first place, by
+// design), and /dev/tty is reachable whenever the CALLING PROCESS's
+// session has a controlling terminal at all, completely independent
+// of whatever that process's own stdin/stdout/stderr happen to be
+// redirected to. That means NO shell-level capture technique --
+// command substitution, file redirection, piping -- can ever
+// intercept text written there, on any real, interactive terminal:
+// every test-script assertion that captures sk's own confirmation
+// text (`out=$(sk ...)`) and pattern-matches it had only ever been
+// exercised in non-interactive contexts (this project's own CI,
+// sandboxed test runs) where no controlling terminal exists at all,
+// so the ALREADY-CORRECT, already-tested os.Stderr fallback path was
+// the one being exercised the entire time -- silently, since nothing
+// about that fallback's own behavior needed this env var to reach it
+// in THOSE environments. The first real-terminal run surfaced this
+// gap immediately. Rather than fight the OS to detach a subprocess's
+// controlling terminal (fragile, and setsid -- the standard Unix tool
+// for exactly that -- isn't even installed on macOS by default),
+// this gives the test harness a direct, explicit way to reach the
+// exact same, already-correct, already-passing fallback path
+// deliberately, on any platform, with no external tool dependency at
+// all.
 func Open() *Session {
 	s := &Session{Out: os.Stderr, In: os.Stdin}
+
+	if os.Getenv("SK_FORCE_NO_TTY") != "" {
+		return s
+	}
 
 	in, out, err := openPlatformTTY()
 	if err != nil {

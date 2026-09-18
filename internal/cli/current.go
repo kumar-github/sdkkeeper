@@ -37,6 +37,11 @@ func newCurrentCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
 
+			if outputFormat == FormatJSON {
+				data, jerr := buildCurrentJSON(toolName)
+				return emitJSON(data, jerr)
+			}
+
 			tool, err := requireTool(toolName)
 			if err != nil {
 				return err
@@ -73,4 +78,57 @@ func newCurrentCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// activeVersionPayload and currentData are `current`'s --format=json
+// success `data` shape (design doc §3). Active is a pointer so
+// "nothing active" serializes as a literal JSON null, exactly
+// matching the doc's own second sample -- explicitly called out there
+// as "a valid, non-error state", so buildCurrentJSON below never
+// returns a jsonError for this case.
+type activeVersionPayload struct {
+	Version string  `json:"version"`
+	Vendor  *string `json:"vendor"`
+}
+
+type currentData struct {
+	Tool   string                `json:"tool"`
+	Active *activeVersionPayload `json:"active"`
+}
+
+// buildCurrentJSON is `current`'s --format=json counterpart. When the
+// tool's env var is set but doesn't match any version sk currently
+// recognizes (e.g. set manually outside sk, or removed after being
+// activated earlier in this shell), this reports active: null rather
+// than the raw, unrecognized value -- design doc §3's schema only
+// defines {version, vendor} or null for `active`, with no third shape
+// for an unmatched raw value, so this stays strictly within what's
+// actually documented rather than inventing an undocumented field.
+func buildCurrentJSON(toolName string) (*currentData, *jsonError) {
+	tool, ok := tooldef.Get(toolName)
+	if !ok {
+		return nil, &jsonError{Code: ErrCodeAmbiguousTool, Message: fmt.Sprintf("unknown tool: %s", toolName)}
+	}
+
+	current, isSet := os.LookupEnv(tool.EnvVar)
+	if !isSet || current == "" {
+		return &currentData{Tool: tool.Name, Active: nil}, nil
+	}
+
+	versions, err := inventory.Scan(tool)
+	if err != nil {
+		return nil, &jsonError{Code: ErrCodeInternalError, Message: err.Error()}
+	}
+	v, ok := findActiveVersion(tool, versions, current)
+	if !ok {
+		return &currentData{Tool: tool.Name, Active: nil}, nil
+	}
+
+	return &currentData{
+		Tool: tool.Name,
+		Active: &activeVersionPayload{
+			Version: v.Number,
+			Vendor:  vendorOf(tool.Name, v.Number),
+		},
+	}, nil
 }

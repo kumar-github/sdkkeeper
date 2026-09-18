@@ -168,3 +168,112 @@ func TestSearchPatches_NoReleasesFoundReportsClearly(t *testing.T) {
 		t.Errorf("expected a clear 'no releases found' message, got:\n%s", out)
 	}
 }
+
+func TestBuildSearchJSON_UnknownToolIsAmbiguousTool(t *testing.T) {
+	_, jerr := buildSearchJSON(context.Background(), "not-a-real-tool", "temurin", "")
+	if jerr == nil || jerr.Code != ErrCodeAmbiguousTool {
+		t.Fatalf("expected ambiguous_tool, got %+v", jerr)
+	}
+}
+
+// TestBuildSearchJSON_UnknownVendorReportsCandidates confirms design
+// doc §1's own sample extra-context field ("e.g. candidates") is
+// actually populated here, with the tool's real, known vendor list.
+func TestBuildSearchJSON_UnknownVendorReportsCandidates(t *testing.T) {
+	_, jerr := buildSearchJSON(context.Background(), "java", "bogus-vendor", "")
+	if jerr == nil || jerr.Code != ErrCodeNotFound {
+		t.Fatalf("expected not_found, got %+v", jerr)
+	}
+	candidates, ok := jerr.Extra["candidates"].([]string)
+	if !ok {
+		t.Fatalf("expected a []string \"candidates\" extra field, got: %+v", jerr.Extra)
+	}
+	found := false
+	for _, c := range candidates {
+		if c == "temurin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected \"temurin\" among the reported candidates, got: %v", candidates)
+	}
+}
+
+// TestBuildSearchMajorsJSON_ReportsLTSFlag confirms the majors-mode
+// shape -- the additive "lts" field this package adds beyond design
+// doc §3's own literal sample (which only covers the patches shape;
+// see searchEntry's own doc comment) -- correctly round-trips each
+// major's real LTS status.
+func TestBuildSearchMajorsJSON_ReportsLTSFlag(t *testing.T) {
+	tool, _ := tooldef.Get("java")
+	provider := mockProvider{
+		name: "temurin",
+		majors: []registry.MajorVersionInfo{
+			{Number: "21", LTS: true},
+			{Number: "20", LTS: false},
+		},
+	}
+	data, jerr := buildSearchMajorsJSON(context.Background(), tool, provider)
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if data.Tool != "java" || data.Vendor != "temurin" {
+		t.Errorf("unexpected tool/vendor: %+v", data)
+	}
+	if len(data.Available) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(data.Available))
+	}
+	if data.Available[0].Version != "21" || data.Available[0].LTS == nil || !*data.Available[0].LTS {
+		t.Errorf("expected major 21 with lts=true, got: %+v", data.Available[0])
+	}
+	if data.Available[1].Version != "20" || data.Available[1].LTS == nil || *data.Available[1].LTS {
+		t.Errorf("expected major 20 with lts=false, got: %+v", data.Available[1])
+	}
+}
+
+// TestBuildSearchPatchesJSON_ReportsInstalledFlag confirms the
+// patches-mode shape matches design doc §3's own literal sample
+// exactly ({version, isInstalled}), and that isInstalled correctly
+// reflects a REAL installed version on disk -- using the same dual
+// bare/vendor-suffixed lookup the interactive searchPatches uses, so
+// the two paths can never disagree about what's installed.
+func TestBuildSearchPatchesJSON_ReportsInstalledFlag(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+
+	tool, _ := tooldef.Get("java")
+	provider := mockProvider{
+		name:    "temurin",
+		patches: []string{"21.0.2", "21.0.1"},
+	}
+	data, jerr := buildSearchPatchesJSON(context.Background(), tool, provider, "21")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if len(data.Available) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(data.Available))
+	}
+	if data.Available[0].Version != "21.0.2" || !data.Available[0].IsInstalled {
+		t.Errorf("expected 21.0.2 marked installed, got: %+v", data.Available[0])
+	}
+	if data.Available[1].Version != "21.0.1" || data.Available[1].IsInstalled {
+		t.Errorf("expected 21.0.1 marked NOT installed, got: %+v", data.Available[1])
+	}
+	if data.Available[0].LTS != nil {
+		t.Errorf("expected no lts field in patches mode, got: %v", *data.Available[0].LTS)
+	}
+}
+
+// TestBuildSearchPatchesJSON_NoReleasesFoundIsNotFound mirrors
+// searchPatches' own registry.ErrVersionNotFound handling exactly --
+// a genuinely nonexistent major reports not_found, not
+// internal_error.
+func TestBuildSearchPatchesJSON_NoReleasesFoundIsNotFound(t *testing.T) {
+	tool, _ := tooldef.Get("java")
+	provider := mockProvider{name: "temurin"} // no patches configured
+	_, jerr := buildSearchPatchesJSON(context.Background(), tool, provider, "99")
+	if jerr == nil || jerr.Code != ErrCodeNotFound {
+		t.Fatalf("expected not_found, got %+v", jerr)
+	}
+}

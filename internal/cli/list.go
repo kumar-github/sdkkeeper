@@ -19,6 +19,15 @@ func newListCmd() *cobra.Command {
 		Args:  requireArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
+
+			// --format=json is a pure, read-only report -- branches off
+			// before the interactive tool-lookup/session.Out/grouped-
+			// text-rendering logic below entirely.
+			if outputFormat == FormatJSON {
+				data, jerr := buildListJSON(toolName)
+				return emitJSON(data, jerr)
+			}
+
 			tool, err := requireTool(toolName)
 			if err != nil {
 				return err
@@ -345,4 +354,69 @@ func buildPickerGroups(tool tooldef.Tool, versions []inventory.Version) []picker
 	}
 
 	return groups
+}
+
+// listInstalledEntry and listData are `list`'s --format=json success
+// `data` shape (design doc §3).
+type listInstalledEntry struct {
+	Version   string  `json:"version"`
+	Vendor    *string `json:"vendor"`
+	IsDefault bool    `json:"isDefault"`
+	IsCurrent bool    `json:"isCurrent"`
+}
+
+type listData struct {
+	Tool      string               `json:"tool"`
+	Installed []listInstalledEntry `json:"installed"`
+}
+
+// buildListJSON is `list`'s --format=json counterpart -- no picker,
+// no session.Out, no vendor/managed-vs-external grouping (the JSON
+// shape design doc §3 gives is a single flat "installed" array; the
+// managed/external distinction and vendor sub-grouping are purely a
+// TEXT-rendering concern this schema doesn't have a slot for --
+// External entries are still included in the flat list, exactly as
+// `list`'s own text output includes them, just without a separate
+// section for them here).
+//
+// Deliberately reuses the exact SAME currentVersion/defaultVersion
+// computation the interactive path uses (findActiveVersion,
+// readDefault) -- this is precisely the cross-command invariant
+// design doc §3 calls out ("list's isCurrent:true entry must always
+// agree with current's active value for the same tool"): both this
+// function and buildCurrentJSON call findActiveVersion the same way,
+// against the same inventory.Scan result, so there is no second,
+// independently-arrived-at notion of "current" that could disagree.
+func buildListJSON(toolName string) (*listData, *jsonError) {
+	tool, ok := tooldef.Get(toolName)
+	if !ok {
+		return nil, &jsonError{Code: ErrCodeAmbiguousTool, Message: fmt.Sprintf("unknown tool: %s", toolName)}
+	}
+
+	versions, err := inventory.Scan(tool)
+	if err != nil {
+		return nil, &jsonError{Code: ErrCodeInternalError, Message: err.Error()}
+	}
+
+	var currentVersion string
+	if tool.EnvVar != "" {
+		if envVal, isSet := os.LookupEnv(tool.EnvVar); isSet {
+			if v, ok := findActiveVersion(tool, versions, envVal); ok {
+				currentVersion = v.Number
+			}
+		}
+	}
+	defaultVersion, _ := readDefault(tool)
+
+	entries := make([]listInstalledEntry, 0, len(versions))
+	for _, v := range versions {
+		entries = append(entries, listInstalledEntry{
+			Version:   v.Number,
+			Vendor:    vendorOf(tool.Name, v.Number),
+			IsDefault: v.Number == defaultVersion,
+			IsCurrent: v.Number == currentVersion,
+		})
+	}
+
+	return &listData{Tool: tool.Name, Installed: entries}, nil
 }

@@ -143,3 +143,74 @@ func TestGet_NuScriptSurfacesStderr(t *testing.T) {
 		t.Errorf("expected the nu script to print $result.stderr unconditionally, got: %s", script)
 	}
 }
+
+// TestGet_ZshScriptGuardsFormatFlagBeforeEval is a regression test for
+// a real, found gap, confirmed directly against a real zsh process:
+// the eval dispatch used to key off $1 alone, so `sk use --format=json
+// java 21...` (flag AFTER the subcommand) reached
+// `eval "$(command sk "$@")"` with sk's own raw JSON object as its
+// input -- `sk --format=json use ...` (flag BEFORE) was accidentally
+// safe only because $1 wasn't literally "use" in that case.
+// --format=json must never reach eval regardless of where it appears.
+func TestGet_ZshScriptGuardsFormatFlagBeforeEval(t *testing.T) {
+	script, err := Get("zsh")
+	if err != nil {
+		t.Fatalf("Get(\"zsh\") failed: %v", err)
+	}
+	if !strings.Contains(script, `"$arg" == "--format" || "$arg" == --format=*`) {
+		t.Errorf("expected the zsh script to scan for --format anywhere in \"$@\", got: %s", script)
+	}
+	if !strings.Contains(script, `if [[ "$has_format" -eq 0 && ( "$1" == "use" || "$1" == "remove" ) ]]`) {
+		t.Errorf("expected the eval branch to be gated on has_format being 0, got: %s", script)
+	}
+}
+
+// TestGet_NuScriptDeclaresFormatFlagExplicitly is a regression test
+// for a real, PRE-EXISTING gap, confirmed directly against a real nu
+// 0.101 process, unrelated to and predating --format's own
+// introduction: Nushell's parser rejects ANY --flag/--flag=value
+// token passed to a custom command that doesn't explicitly declare
+// it, with a parse-time "nu::parser::unknown_flag" error, before this
+// script's own function body ever runs at all -- confirmed against
+// the ORIGINAL, unmodified script too, so `sk --format=json use ...`
+// through this wrapper was ALREADY completely broken before --format
+// was ever added to this project, regardless of position. Declaring
+// --format explicitly in the signature fixes this outright, and
+// Nushell's own named-flag parsing (confirmed directly) then extracts
+// it correctly no matter where it appears among the other arguments.
+func TestGet_NuScriptDeclaresFormatFlagExplicitly(t *testing.T) {
+	script, err := Get("nu")
+	if err != nil {
+		t.Fatalf("Get(\"nu\") failed: %v", err)
+	}
+	if !strings.Contains(script, "--format: string") {
+		t.Errorf("expected the nu script to declare --format explicitly in its signature, got: %s", script)
+	}
+	if !strings.Contains(script, `if ($format != null) {`) {
+		t.Errorf("expected the nu script to branch on $format being set, got: %s", script)
+	}
+	if !strings.Contains(script, "^sk --format $format ...$args") {
+		t.Errorf("expected the nu script to pass --format straight through, never via eval/--shell-format=json, got: %s", script)
+	}
+}
+
+// TestGet_PowershellScriptGuardsFormatFlagBeforeInvokeExpression is a
+// regression test for a real, found gap, confirmed directly against a
+// real pwsh 7.4 process: the Invoke-Expression dispatch used to key
+// off $args[0] alone, so `sk use --format=json java 21...` (flag
+// AFTER the subcommand) reached Invoke-Expression with sk's own raw
+// JSON object as its input -- confirmed to fail outright with a real
+// PowerShell parse error ("Unexpected token ... in expression or
+// statement").
+func TestGet_PowershellScriptGuardsFormatFlagBeforeInvokeExpression(t *testing.T) {
+	script, err := Get("powershell")
+	if err != nil {
+		t.Fatalf("Get(\"powershell\") failed: %v", err)
+	}
+	if !strings.Contains(script, `$a -eq "--format" -or $a -like "--format=*"`) {
+		t.Errorf("expected the PowerShell script to scan $args for --format, got: %s", script)
+	}
+	if !strings.Contains(script, "if (-not $hasFormat -and $args.Count -ge 1") {
+		t.Errorf("expected the Invoke-Expression branch to be gated on -not $hasFormat, got: %s", script)
+	}
+}

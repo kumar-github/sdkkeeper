@@ -8,6 +8,7 @@ import (
 
 	"sdkkeeper/internal/inventory"
 	"sdkkeeper/internal/picker"
+	"sdkkeeper/internal/tooldef"
 )
 
 // removeVersion deletes v from disk, using the correct mechanism for
@@ -36,14 +37,24 @@ func newRemoveCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
 
-			tool, err := requireTool(toolName)
-			if err != nil {
-				return err
-			}
-
 			version := ""
 			if len(args) == 2 {
 				version = args[1]
+			}
+
+			// --format=json branches off before the interactive tool
+			// lookup/picker/session.Out machinery below -- same
+			// reasoning as use.go's own branch (design doc §2/§6):
+			// never launches a picker, reports version_required
+			// immediately instead when no version is given.
+			if outputFormat == FormatJSON {
+				data, jerr := resolveRemoveJSON(toolName, version)
+				return emitJSON(data, jerr)
+			}
+
+			tool, err := requireTool(toolName)
+			if err != nil {
+				return err
 			}
 
 			// No version given -- show a picker, matching `use`'s own
@@ -199,4 +210,100 @@ func newRemoveCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// removalPayload is remove's OWN success `data` shape -- built on the
+// same {tool, version, vendor, action} fields design doc §2 gives
+// use/default (which keep that exact, unmodified shape -- see
+// activationPayload), plus two additive fields the frozen doc doesn't
+// cover: WasCurrent and WasDefault.
+//
+// A real, confirmed gap found via actual use, not a hypothetical:
+// removing the version currently active in the CALLING shell deletes
+// the real files on disk exactly like interactive `sk remove` does,
+// but --format=json is (by design -- see resolveUseJSON's own doc
+// comment on the identical limitation for `use`) a REPORT, never a
+// shell action: it can no more unset the caller's JAVA_HOME than it
+// can set it. Without these two fields, a caller had ZERO way to
+// learn that the version it just told sk to delete was the one its
+// OWN environment was still pointing at -- exactly what happened:
+// `java` broke immediately after the remove call, and a SEPARATE,
+// later `sk current java` could only report a raw, unmatched
+// JAVA_HOME value, because nothing had ever told that shell to clear
+// it. These two fields don't fix that inherent limitation -- nothing
+// can, short of the caller reacting to them by unsetting the relevant
+// env var itself -- but they make the situation visible instead of
+// silent.
+type removalPayload struct {
+	Tool       string  `json:"tool"`
+	Version    string  `json:"version"`
+	Vendor     *string `json:"vendor"`
+	Action     string  `json:"action"`
+	WasCurrent bool    `json:"wasCurrent"`
+	WasDefault bool    `json:"wasDefault"`
+}
+
+// resolveRemoveJSON is `remove`'s --format=json counterpart -- no
+// picker, no session.Out; mirrors the interactive RunE's own logic
+// (find the version, check wasCurrent/wasDefault, delete it, clear a
+// matching stored default) exactly, minus every piece of console
+// output and picker fallback.
+func resolveRemoveJSON(toolName, versionArg string) (*removalPayload, *jsonError) {
+	tool, ok := tooldef.Get(toolName)
+	if !ok {
+		return nil, &jsonError{Code: ErrCodeAmbiguousTool, Message: fmt.Sprintf("unknown tool: %s", toolName)}
+	}
+
+	if versionArg == "" {
+		return nil, &jsonError{Code: ErrCodeVersionRequired, Message: fmt.Sprintf("a version is required to remove %s in --format=json (the interactive picker cannot be shown)", tool.DisplayName)}
+	}
+
+	v, ok := inventory.Find(tool, versionArg)
+	if !ok {
+		return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("%s%s not found", tool.FolderPrefix, versionArg)}
+	}
+
+	// Both checked BEFORE deletion, deliberately -- mirrors the
+	// interactive RunE's own wasActive check exactly, including WHY it
+	// has to happen first: HomePath's filesystem probing (see
+	// tooldef.Tool's own doc comment) needs the real files to still
+	// exist to give the right answer; computing this AFTER v.Path is
+	// gone would silently give a different, wrong result.
+	wasCurrent := false
+	if tool.EnvVar != "" {
+		if current, isSet := os.LookupEnv(tool.EnvVar); isSet {
+			_, wasCurrent = findActiveVersion(tool, []inventory.Version{v}, current)
+		}
+	}
+	wasDefault := false
+	if stored, err := readDefault(tool); err == nil && stored == v.Number {
+		wasDefault = true
+	}
+
+	// The target was genuinely resolved -- a failure from here on is
+	// activation_failed (design doc: "resolved version, but activation
+	// itself failed"), generalized here to "the state-changing
+	// operation on the resolved target failed", not internal_error.
+	if err := removeVersion(v); err != nil {
+		return nil, &jsonError{Code: ErrCodeActivationFailed, Message: fmt.Sprintf("could not remove %s%s: %s", tool.FolderPrefix, v.Number, err)}
+	}
+
+	// Best-effort, exactly like the interactive path: a failure here
+	// doesn't undo the deletion that already succeeded, and isn't
+	// itself reported as this call's own error -- matching
+	// clearedDefault's own "clearedDefault := false" swallow-and-move-on
+	// pattern in the interactive RunE above. wasDefault is already
+	// known from the check above, so this only needs to ACT on it now.
+	if wasDefault {
+		_ = clearDefaultFile(tool)
+	}
+
+	return &removalPayload{
+		Tool:       tool.Name,
+		Version:    v.Number,
+		Vendor:     vendorOf(tool.Name, v.Number),
+		Action:     string(actionRemoved),
+		WasCurrent: wasCurrent,
+		WasDefault: wasDefault,
+	}, nil
 }

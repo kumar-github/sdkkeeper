@@ -93,6 +93,15 @@ func Execute(version string) error {
 	root.PersistentFlags().StringVar(&shellFormatFlag, "shell-format", "", "")
 	root.PersistentFlags().MarkHidden("shell-format")
 
+	// --format is the stable, DOCUMENTED, external-facing counterpart
+	// to --shell-format -- deliberately NOT hidden (design doc §7/§8:
+	// the two are kept permanently separate, and this one is meant to
+	// actually be discovered via `sk --help`). Registered as a custom
+	// pflag.Value, not a plain StringVar, specifically so an
+	// unrecognized value is a hard parse-time error rather than
+	// silently accepted (see formatFlagValue's own doc comment).
+	root.PersistentFlags().Var(formatFlagValue{}, "format", `output format for machine consumption ("json")`)
+
 	root.AddCommand(newUseCmd())
 	root.AddCommand(newListCmd())
 	root.AddCommand(newInitCmd())
@@ -124,21 +133,30 @@ func Execute(version string) error {
 // Cobra doesn't expose a typed/sentinel error for this specific case
 // (both are plain fmt.Errorf from cobra's own source), so this
 // necessarily checks the message text itself -- narrow, deliberately
-// only matching cobra's own two known prefixes for this exact
+// only matching cobra's own/pflag's own known prefixes for this exact
 // category, so it can never accidentally re-print an error a command's
 // own RunE already handled and printed itself.
 //
+// "invalid argument " is pflag's own prefix (flag.go's
+// `invalid argument %q for %q flag: %v`) for a registered flag's Set
+// method rejecting its value -- added specifically for --format's own
+// closed-enum validation (see formatFlagValue.Set): that failure, like
+// an unknown command/flag, happens during cobra's flag-parsing pass,
+// strictly BEFORE PersistentPreRunE ever runs, so it would otherwise
+// be silently swallowed by SilenceErrors exactly like the other two
+// cases this function already existed to catch.
+//
 // Same term.StylesForWriter(os.Stderr) technique as requireArgs, for
 // the identical reason: this runs after root.Execute() returns, but
-// an unknown-command/unknown-flag error is detected by cobra BEFORE
-// PersistentPreRunE ever runs (same as Args validation), so
-// session/styles are genuinely still nil here too.
+// an unknown-command/unknown-flag/invalid-flag-value error is detected
+// by cobra BEFORE PersistentPreRunE ever runs (same as Args
+// validation), so session/styles are genuinely still nil here too.
 func printUnreportedError(err error) {
 	if err == nil {
 		return
 	}
 	msg := err.Error()
-	if !strings.HasPrefix(msg, "unknown command") && !strings.HasPrefix(msg, "unknown flag:") && !strings.HasPrefix(msg, "unknown shorthand flag:") {
+	if !strings.HasPrefix(msg, "unknown command") && !strings.HasPrefix(msg, "unknown flag:") && !strings.HasPrefix(msg, "unknown shorthand flag:") && !strings.HasPrefix(msg, "invalid argument ") {
 		return
 	}
 	s := term.StylesForWriter(os.Stderr)

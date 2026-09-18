@@ -25,7 +25,14 @@ import (
 var version = "dev"
 
 func main() {
-	if err := cli.Execute(version); err != nil {
-		os.Exit(1)
-	}
+	err := cli.Execute(version)
+	// cli.ExitCode implements the full --format=json exit-code table
+	// (design doc §5: 0 success, 1 generic/internal_error, then the
+	// per-error-code table 101-201) while staying a complete no-op for
+	// every existing, unchanged interactive-mode error -- nil -> 0,
+	// anything that isn't a *cli.CLIError -> 1, exactly matching this
+	// function's own ORIGINAL, unconditional os.Exit(1) behavior. No
+	// interactive command's exit code changes just because this table
+	// now exists; only --format=json paths ever produce a *CLIError.
+	os.Exit(cli.ExitCode(err))
 }

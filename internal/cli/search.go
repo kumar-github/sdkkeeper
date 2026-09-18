@@ -23,6 +23,20 @@ func newSearchCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName, vendorName := args[0], args[1]
 
+			// --format=json branches off before requireTool's own
+			// session.Out printing -- both the majors and patches
+			// shapes below need the same tool/vendor validation the
+			// interactive path does, just reported as a JSON error
+			// instead of printed text.
+			if outputFormat == FormatJSON {
+				major := ""
+				if len(args) == 3 {
+					major = args[2]
+				}
+				data, jerr := buildSearchJSON(cmd.Context(), toolName, vendorName, major)
+				return emitJSON(data, jerr)
+			}
+
 			tool, err := requireTool(toolName)
 			if err != nil {
 				return err
@@ -149,4 +163,97 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// searchEntry and searchData are `search`'s --format=json success
+// `data` shape (design doc §3). LTS is a pointer, present only for
+// the major-listing mode (no major arg given) -- design doc §3's own
+// sample only covers the PATCH-listing mode ("available":
+// [{version, isInstalled}]); it doesn't address search's other real
+// mode (major versions, each with an LTS flag, no installed concept)
+// at all. Rather than force majors into the exact same
+// {version,isInstalled} shape and silently drop LTS entirely, this
+// adds one omitempty field for that mode -- additive, not a
+// contradiction of what the doc DOES specify.
+type searchEntry struct {
+	Version     string `json:"version"`
+	IsInstalled bool   `json:"isInstalled"`
+	LTS         *bool  `json:"lts,omitempty"`
+}
+
+type searchData struct {
+	Tool      string        `json:"tool"`
+	Vendor    string        `json:"vendor"`
+	Available []searchEntry `json:"available"`
+}
+
+// buildSearchJSON is `search`'s --format=json counterpart --
+// validates tool/vendor exactly like the interactive path, then
+// dispatches to the majors or patches shape depending on whether a
+// major was given, matching the interactive RunE's own len(args)
+// branch.
+func buildSearchJSON(ctx context.Context, toolName, vendorName, major string) (*searchData, *jsonError) {
+	tool, ok := tooldef.Get(toolName)
+	if !ok {
+		return nil, &jsonError{Code: ErrCodeAmbiguousTool, Message: fmt.Sprintf("unknown tool: %s", toolName)}
+	}
+
+	provider, ok := providersFor(tool.Name)[vendorName]
+	if !ok {
+		available := vendorNamesFor(tool.Name)
+		return nil, &jsonError{
+			Code:    ErrCodeNotFound,
+			Message: fmt.Sprintf("unknown vendor: %s", vendorName),
+			Extra:   map[string]interface{}{"candidates": available},
+		}
+	}
+
+	if major == "" {
+		return buildSearchMajorsJSON(ctx, tool, provider)
+	}
+	return buildSearchPatchesJSON(ctx, tool, provider, major)
+}
+
+func buildSearchMajorsJSON(ctx context.Context, tool tooldef.Tool, provider registry.Provider) (*searchData, *jsonError) {
+	infos, err := provider.ListMajorVersionsWithLTS(ctx)
+	if err != nil {
+		return nil, &jsonError{Code: ErrCodeInternalError, Message: fmt.Sprintf("could not list available %s major versions: %s", tool.DisplayName, err)}
+	}
+
+	entries := make([]searchEntry, len(infos))
+	for i, info := range infos {
+		lts := info.LTS
+		entries[i] = searchEntry{Version: info.Number, LTS: &lts}
+	}
+	return &searchData{Tool: tool.Name, Vendor: provider.Name(), Available: entries}, nil
+}
+
+func buildSearchPatchesJSON(ctx context.Context, tool tooldef.Tool, provider registry.Provider, major string) (*searchData, *jsonError) {
+	patches, err := provider.ListPatchVersions(ctx, major, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		if err == registry.ErrVersionNotFound {
+			return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("no %s %s releases found for %s/%s via %s", tool.DisplayName, major, runtime.GOOS, runtime.GOARCH, provider.Name())}
+		}
+		return nil, &jsonError{Code: ErrCodeInternalError, Message: fmt.Sprintf("could not list %s %s versions: %s", tool.DisplayName, major, err)}
+	}
+
+	// Same dual bare/vendor-suffixed lookup as searchPatches' own text
+	// rendering (see that function's doc comment for why both forms
+	// are checked) -- kept identical here so the JSON and text paths
+	// can never disagree about which patches are already installed.
+	installed, _ := inventory.Scan(tool)
+	installedFor := make(map[string]inventory.Version, len(installed))
+	for _, v := range installed {
+		installedFor[v.Number] = v
+	}
+
+	entries := make([]searchEntry, len(patches))
+	for i, p := range patches {
+		_, isInstalled := installedFor[p+"-"+provider.Name()]
+		if !isInstalled {
+			_, isInstalled = installedFor[p]
+		}
+		entries[i] = searchEntry{Version: p, IsInstalled: isInstalled}
+	}
+	return &searchData{Tool: tool.Name, Vendor: provider.Name(), Available: entries}, nil
 }

@@ -177,6 +177,39 @@ func setTestHome(t *testing.T, home string) {
 	t.Setenv("USERPROFILE", home)
 }
 
+// installFakeJava and installFakeMaven build the minimal, real
+// on-disk directory shape inventory.Scan/tooldef.Tool expect for a
+// genuinely "installed" version -- shared fixtures for the new
+// --format=json tests (use_test.go, default_test.go, list_test.go,
+// current_test.go, search_test.go, json_consistency_test.go), all of
+// which need a real installed version to resolve against rather than
+// a synthetic inventory.Version{} struct built by hand (which
+// wouldn't actually be found by inventory.Find/Scan, since those read
+// the real filesystem). Callers must call setTestHome first.
+func installFakeJava(t *testing.T, home, number string) {
+	t.Helper()
+	tool, ok := tooldef.Get("java")
+	if !ok {
+		t.Fatalf("tooldef.Get(java) failed -- test fixture assumption broken")
+	}
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+number)
+	if err := os.MkdirAll(tool.BinPath(dir), 0o755); err != nil {
+		t.Fatalf("installFakeJava setup failed: %v", err)
+	}
+}
+
+func installFakeMaven(t *testing.T, home, number string) {
+	t.Helper()
+	tool, ok := tooldef.Get("maven")
+	if !ok {
+		t.Fatalf("tooldef.Get(maven) failed -- test fixture assumption broken")
+	}
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+number)
+	if err := os.MkdirAll(tool.BinPath(dir), 0o755); err != nil {
+		t.Fatalf("installFakeMaven setup failed: %v", err)
+	}
+}
+
 // TestRenderTable_NeverTruncatesContent is a regression test for a
 // real bug found while building this: lipgloss/table miscalculates
 // column widths when cell content carries embedded ANSI codes,

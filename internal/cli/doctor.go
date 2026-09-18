@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -32,6 +33,11 @@ func newDoctorCmd() *cobra.Command {
 		Short: "Check SDK Keeper's own managed state for problems",
 		Args:  requireArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if outputFormat == FormatJSON {
+				data := buildDoctorJSON(cmd.Context())
+				return emitDoctorJSON(data)
+			}
+
 			fmt.Fprintln(session.Out)
 			fmt.Fprintln(session.Out, styles.Header.Render("Checking SDK Keeper..."))
 			fmt.Fprintln(session.Out)
@@ -298,4 +304,139 @@ func sortedTools() []tooldef.Tool {
 	}
 
 	return tools
+}
+
+// doctorCheckJSON and doctorSummaryJSON/doctorData are `doctor`'s
+// --format=json `data` shape (design doc §4).
+type doctorCheckJSON struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+type doctorSummaryJSON struct {
+	Pass int `json:"pass"`
+	Warn int `json:"warn"`
+	Fail int `json:"fail"`
+}
+
+type doctorData struct {
+	Checks  []doctorCheckJSON `json:"checks"`
+	Summary doctorSummaryJSON `json:"summary"`
+}
+
+// buildDoctorJSON is `doctor`'s --format=json counterpart. Reuses the
+// exact same checkX functions the interactive path's printCheck calls
+// -- those are already pure (no printing at all; only printCheck
+// itself prints) -- so the JSON and text paths can never disagree
+// about which issues were actually found, only about how they're
+// rendered. Vendor reachability is folded into ONE named check here
+// ("vendor_reachability"), unlike printVendorReachability's own
+// per-vendor inline printing, to fit the same {name, status, message}
+// shape every other check uses -- one issue-message per unreachable
+// vendor, joined together, rather than a separate top-level check per
+// vendor with no shared name to group them under.
+func buildDoctorJSON(ctx context.Context) *doctorData {
+	type namedCheck struct {
+		name   string
+		plural string
+		issues []doctorIssue
+	}
+	groups := []namedCheck{
+		{"dangling_registrations", "dangling registrations", checkDanglingRegistrations()},
+		{"incomplete_installs", "incomplete installs", checkIncompleteInstalls()},
+		{"stale_defaults", "stale defaults", checkStaleDefaults()},
+		{"leftover_temp_dirs", "leftover temp directories", checkLeftoverTempDirs()},
+	}
+
+	var checks []doctorCheckJSON
+	var summary doctorSummaryJSON
+	for _, g := range groups {
+		c := doctorCheckJSONFrom(g.name, g.plural, g.issues)
+		checks = append(checks, c)
+		tallyDoctorStatus(&summary, c.Status)
+	}
+
+	vendorCheck := buildVendorReachabilityCheckJSON(ctx)
+	checks = append(checks, vendorCheck)
+	tallyDoctorStatus(&summary, vendorCheck.Status)
+
+	return &doctorData{Checks: checks, Summary: summary}
+}
+
+// doctorCheckJSONFrom mirrors printCheck's own pass/warn/fail
+// coloring rule exactly (same allWarnings condition), just building a
+// struct instead of printing styled text.
+func doctorCheckJSONFrom(name, plural string, issues []doctorIssue) doctorCheckJSON {
+	if len(issues) == 0 {
+		return doctorCheckJSON{Name: name, Status: "pass", Message: fmt.Sprintf("No %s", plural)}
+	}
+	status := "fail"
+	if allWarnings(issues) {
+		status = "warn"
+	}
+	messages := make([]string, len(issues))
+	for i, issue := range issues {
+		messages[i] = issue.message
+	}
+	return doctorCheckJSON{Name: name, Status: status, Message: strings.Join(messages, "; ")}
+}
+
+// buildVendorReachabilityCheckJSON mirrors printVendorReachability's
+// own reachability loop exactly, collecting results into one named
+// check instead of printing one line per vendor.
+func buildVendorReachabilityCheckJSON(ctx context.Context) doctorCheckJSON {
+	var problems []string
+	reachable := 0
+	for _, tool := range sortedTools() {
+		for _, name := range vendorNamesFor(tool.Name) {
+			provider := providersFor(tool.Name)[name]
+			checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, err := provider.ListMajorVersions(checkCtx)
+			cancel()
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s API unreachable: %s", capitalize(name), err))
+				continue
+			}
+			reachable++
+		}
+	}
+	if len(problems) == 0 {
+		return doctorCheckJSON{Name: "vendor_reachability", Status: "pass", Message: fmt.Sprintf("%d vendor API(s) reachable", reachable)}
+	}
+	return doctorCheckJSON{Name: "vendor_reachability", Status: "fail", Message: strings.Join(problems, "; ")}
+}
+
+// tallyDoctorStatus adds one check's status into the running summary
+// counts.
+func tallyDoctorStatus(summary *doctorSummaryJSON, status string) {
+	switch status {
+	case "pass":
+		summary.Pass++
+	case "warn":
+		summary.Warn++
+	case "fail":
+		summary.Fail++
+	}
+}
+
+// emitDoctorJSON is doctor's own emitter, deliberately NOT the shared
+// emitJSON every other command uses -- design doc §4's own nuance:
+// "the envelope's top-level status is error ONLY if the diagnostic
+// process itself couldn't run... never for reporting a failed check.
+// A fail check is a finding, not an invocation error." So this always
+// writes a SUCCESS envelope (nothing in this package's current check
+// functions represents "doctor itself couldn't run" as a distinct
+// condition -- every checkX function already swallows its own scan
+// errors and continues, matching the interactive path's existing
+// leniency), but still returns a *CLIError for exit code 201 (design
+// doc §5: "doctor exits 201 only when a check is fail") whenever the
+// summary shows at least one failing check -- a genuine case of a
+// SUCCESSFUL envelope paired with a non-zero process exit code.
+func emitDoctorJSON(data *doctorData) error {
+	writeJSONEnvelope(jsonEnvelope{SchemaVersion: schemaVersion, Status: "ok", Data: data})
+	if data.Summary.Fail > 0 {
+		return &CLIError{Code: ErrCodeDoctorCheckFailed, Err: fmt.Errorf("%d check(s) failed", data.Summary.Fail)}
+	}
+	return nil
 }

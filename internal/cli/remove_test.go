@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"sdkkeeper/internal/inventory"
+	"sdkkeeper/internal/tooldef"
 )
 
 // TestRemoveVersion_RealDirectoryDeletesFiles confirms a genuine,
@@ -71,5 +72,146 @@ func TestRemoveVersion_SymlinkOnlyRemovesTheLinkNotTheRealFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(realExternalDir); err != nil {
 		t.Fatalf("CRITICAL: real external directory itself was affected: %v", err)
+	}
+}
+
+func TestResolveRemoveJSON_UnknownToolIsAmbiguousTool(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	_, jerr := resolveRemoveJSON("not-a-real-tool", "1.0")
+	if jerr == nil || jerr.Code != ErrCodeAmbiguousTool {
+		t.Fatalf("expected ambiguous_tool, got %+v", jerr)
+	}
+}
+
+// TestResolveRemoveJSON_NoVersionIsVersionRequired confirms design doc
+// §6 applies to `remove` too -- no picker under --format=json, ever.
+func TestResolveRemoveJSON_NoVersionIsVersionRequired(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	_, jerr := resolveRemoveJSON("java", "")
+	if jerr == nil || jerr.Code != ErrCodeVersionRequired {
+		t.Fatalf("expected version_required, got %+v", jerr)
+	}
+}
+
+func TestResolveRemoveJSON_UnknownVersionIsNotFound(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	_, jerr := resolveRemoveJSON("java", "99.0.0-temurin")
+	if jerr == nil || jerr.Code != ErrCodeNotFound {
+		t.Fatalf("expected not_found, got %+v", jerr)
+	}
+}
+
+// TestResolveRemoveJSON_RealVersionIsActuallyDeletedFromDisk is the
+// main happy path: confirms the JSON path performs the SAME real
+// deletion the interactive path does (not just reporting success
+// without acting), and reports the correct vendor + "removed" action.
+func TestResolveRemoveJSON_RealVersionIsActuallyDeletedFromDisk(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-liberica")
+	tool, _ := tooldef.Get("java")
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-liberica")
+
+	data, jerr := resolveRemoveJSON("java", "21.0.2-liberica")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if data.Action != string(actionRemoved) {
+		t.Errorf("expected action=removed, got %q", data.Action)
+	}
+	if data.Vendor == nil || *data.Vendor != "liberica" {
+		t.Errorf("expected vendor=liberica, got %v", data.Vendor)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("expected the real directory to be deleted from disk, got Stat error: %v", err)
+	}
+}
+
+// TestResolveRemoveJSON_ClearsMatchingStoredDefault mirrors the
+// interactive path's own "removing the current default clears it too"
+// behavior (see remove.go's clearedDefault logic) -- a real, confirmed
+// gap that would otherwise leave `sk default java` (or its own
+// --format=json counterpart) pointing at a version that no longer
+// exists.
+func TestResolveRemoveJSON_ClearsMatchingStoredDefault(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	tool, _ := tooldef.Get("java")
+	if err := os.MkdirAll(filepath.Dir(tool.DefaultPath()), 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	if err := os.WriteFile(tool.DefaultPath(), []byte("21.0.2-temurin"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+
+	if _, jerr := resolveRemoveJSON("java", "21.0.2-temurin"); jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+
+	if _, err := os.Stat(tool.DefaultPath()); !os.IsNotExist(err) {
+		t.Errorf("expected the now-dangling default file to be cleared, got Stat error: %v", err)
+	}
+}
+
+// TestResolveRemoveJSON_ReportsWasCurrentAndWasDefault is the direct
+// regression test for a real, reported bug: removing the version that
+// is BOTH the currently-active one (via the tool's real env var) AND
+// the stored default previously reported neither fact in the JSON
+// payload at all -- a caller (a script, an agent, a human reading the
+// output) had no way to learn its OWN shell's JAVA_HOME was now
+// dangling, since --format=json can't unset it unprompted (same
+// inherent limitation as resolveUseJSON's own "does not mutate the
+// shell" behavior). WasCurrent/WasDefault exist specifically to make
+// that visible.
+func TestResolveRemoveJSON_ReportsWasCurrentAndWasDefault(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	tool, _ := tooldef.Get("java")
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-temurin")
+
+	if err := os.MkdirAll(filepath.Dir(tool.DefaultPath()), 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	if err := os.WriteFile(tool.DefaultPath(), []byte("21.0.2-temurin"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	t.Setenv(tool.EnvVar, tool.HomePath(dir))
+
+	data, jerr := resolveRemoveJSON("java", "21.0.2-temurin")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if !data.WasCurrent {
+		t.Error("expected WasCurrent=true -- this version's env var matched exactly")
+	}
+	if !data.WasDefault {
+		t.Error("expected WasDefault=true -- this version was the stored default")
+	}
+}
+
+// TestResolveRemoveJSON_ReportsFalseWhenNeitherCurrentNorDefault
+// confirms the negative case isn't just a hardcoded true -- removing
+// an installed-but-inactive, non-default version reports both flags
+// false.
+func TestResolveRemoveJSON_ReportsFalseWhenNeitherCurrentNorDefault(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	installFakeJava(t, home, "17.0.9-temurin")
+	tool, _ := tooldef.Get("java")
+	activeDir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"17.0.9-temurin")
+	t.Setenv(tool.EnvVar, tool.HomePath(activeDir)) // a DIFFERENT version is active
+
+	data, jerr := resolveRemoveJSON("java", "21.0.2-temurin")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if data.WasCurrent {
+		t.Error("expected WasCurrent=false -- a different version was active")
+	}
+	if data.WasDefault {
+		t.Error("expected WasDefault=false -- no default was ever set")
 	}
 }

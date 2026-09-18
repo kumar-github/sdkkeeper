@@ -1,4 +1,27 @@
-def --env sk [...args] {
+def --env sk [
+    # Declared explicitly, not left to the rest parameter below --
+    # Nushell's OWN parser rejects any bare --flag/--flag=value token
+    # passed to a custom command UNLESS that command's signature
+    # declares it, treating it as an unrecognized flag at PARSE TIME,
+    # before this function body ever runs at all. A real, pre-existing
+    # gap this predates and is unrelated to: `sk --format=json use
+    # java 21...` was ALREADY rejected outright through this wrapper,
+    # confirmed directly against the ORIGINAL, unmodified template,
+    # with an error from Nushell's parser itself
+    # ("nu::parser::unknown_flag ... The `sk` command doesn't have
+    # flag `format`"), regardless of where --format appeared in the
+    # call or what value followed it. Declaring it here fixes that
+    # outright, and -- as a genuinely pleasant, confirmed-by-testing
+    # side effect -- Nushell's own named-flag parsing extracts a
+    # declared flag correctly no matter where it appears among the
+    # other arguments (before or after "use"/"remove", and whether
+    # written --format=json or --format json), so $format below is
+    # always populated correctly and $args always contains only the
+    # remaining positional arguments, with zero extra work needed here
+    # to account for its position.
+    --format: string,
+    ...args
+] {
     # A real, live-caught bug: Nushell's OWN parser converts a bare,
     # unquoted `null` word into its OWN `nothing` type at PARSE TIME,
     # not the literal string "null" -- confirmed directly by testing
@@ -18,7 +41,16 @@ def --env sk [...args] {
     # and unambiguous.
     let args = ($args | each {|a| if ($a == null) { "null" } else { $a } })
 
-    if ($args | length) >= 1 and (($args | get 0) == "use" or ($args | get 0) == "remove") {
+    if ($format != null) {
+        # --format was given (anywhere -- see the signature's own doc
+        # comment above) -- always a plain, direct passthrough, never
+        # eval, never --shell-format=json appended below.
+        # --format=json is fundamentally a report, never a shell
+        # action (design doc §6/§8: the two are kept permanently
+        # independent), so it must never reach the eval/
+        # --shell-format=json branch at all.
+        ^sk --format $format ...$args
+    } else if ($args | length) >= 1 and (($args | get 0) == "use" or ($args | get 0) == "remove") {
         let result = (^sk ...$args --shell-format=json | complete)
         # A real, live-reported bug, confirmed by actually reproducing
         # it through a real nu session (not caught by any earlier

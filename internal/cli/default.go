@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"sdkkeeper/internal/inventory"
+	"sdkkeeper/internal/tooldef"
 )
 
 func newDefaultCmd() *cobra.Command {
@@ -18,6 +21,21 @@ func newDefaultCmd() *cobra.Command {
 		Args: requireArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
+
+			versionArg := ""
+			if len(args) == 2 {
+				versionArg = args[1]
+			}
+
+			// --format=json branches off before ANY of the interactive
+			// tool-lookup/session.Out logic below -- design doc §2
+			// gives `default` the exact same activationPayload shape
+			// as `use`/`remove`, covering set, show, and clear all
+			// through the same "action" enum.
+			if outputFormat == FormatJSON {
+				data, jerr := resolveDefaultJSON(toolName, versionArg)
+				return emitJSON(data, jerr)
+			}
 
 			tool, err := requireTool(toolName)
 			if err != nil {
@@ -107,4 +125,71 @@ func newDefaultCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// resolveDefaultJSON is `default`'s --format=json counterpart --
+// covers all three of the interactive command's shapes (show/set/
+// clear) under the SAME activationPayload/action-enum design doc §2
+// gives `use`/`remove`, since `default` is explicitly called out
+// there as "the same kind of state-mutating operation".
+func resolveDefaultJSON(toolName, versionArg string) (*activationPayload, *jsonError) {
+	tool, ok := tooldef.Get(toolName)
+	if !ok {
+		return nil, &jsonError{Code: ErrCodeAmbiguousTool, Message: fmt.Sprintf("unknown tool: %s", toolName)}
+	}
+
+	if versionArg == "" {
+		// Show the current default. Reported under the SAME
+		// "defaulted" action value used for actually setting one --
+		// design doc §2's enum has no separate "show" value, and a
+		// default that's currently set IS "defaulted" regardless of
+		// whether THIS call set it or merely reports one already set
+		// by an earlier call.
+		current, err := readDefault(tool)
+		if err != nil {
+			return nil, &jsonError{Code: ErrCodeInternalError, Message: err.Error()}
+		}
+		if current == "" {
+			return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("no default %s set", tool.DisplayName)}
+		}
+		return &activationPayload{
+			Tool:    tool.Name,
+			Version: current,
+			Vendor:  vendorOf(tool.Name, current),
+			Action:  string(actionDefaulted),
+		}, nil
+	}
+
+	if versionArg == "null" {
+		if err := clearDefaultFile(tool); err != nil {
+			return nil, &jsonError{Code: ErrCodeActivationFailed, Message: fmt.Sprintf("could not clear default: %s", err)}
+		}
+		return &activationPayload{
+			Tool:    tool.Name,
+			Version: "",
+			Vendor:  nil,
+			Action:  string(actionDefaultCleared),
+		}, nil
+	}
+
+	// Setting a default -- validated against what's actually installed
+	// FIRST, same principle as the interactive path (reuses
+	// inventory.Find rather than the interactive path's direct
+	// os.Lstat, since that's the same "does this actually exist" check
+	// every other JSON-path function in this package already uses).
+	if _, ok := inventory.Find(tool, versionArg); !ok {
+		return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("%s%s is not installed -- cannot set it as default", tool.FolderPrefix, versionArg)}
+	}
+	if err := os.MkdirAll(filepath.Dir(tool.DefaultPath()), 0o755); err != nil {
+		return nil, &jsonError{Code: ErrCodeActivationFailed, Message: fmt.Sprintf("could not create defaults directory: %s", err)}
+	}
+	if err := os.WriteFile(tool.DefaultPath(), []byte(versionArg), 0o644); err != nil {
+		return nil, &jsonError{Code: ErrCodeActivationFailed, Message: fmt.Sprintf("could not set default: %s", err)}
+	}
+	return &activationPayload{
+		Tool:    tool.Name,
+		Version: versionArg,
+		Vendor:  vendorOf(tool.Name, versionArg),
+		Action:  string(actionDefaulted),
+	}, nil
 }

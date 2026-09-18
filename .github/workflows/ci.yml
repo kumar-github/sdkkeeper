@@ -262,6 +262,56 @@ jobs:
           }
           print "OK: JAVA_HOME and PATH correctly cleared via the real Nushell wrapper (confirmed against a real external process too)"
 
+      # A real, PRE-EXISTING gap this project's own testing had never
+      # caught: Nushell's parser rejects ANY --flag/--flag=value token
+      # passed to a custom command that doesn't declare it, at PARSE
+      # TIME, before the wrapper's own function body ever runs --
+      # confirmed directly against a real nu 0.101 process, and
+      # confirmed to predate --format's own introduction entirely (the
+      # ORIGINAL, unmodified wrapper rejected --format=json outright,
+      # regardless of position). Fixed by declaring --format
+      # explicitly in init.nu.tmpl's own signature -- this step is the
+      # one true end-to-end confirmation that fix actually works on a
+      # real nu process, in both flag positions, not just that the
+      # generated script parses.
+      - name: "Real Nushell wrapper: --format=json is never eval'd, in either flag position"
+        shell: nu {0}
+        run: |
+          $env.PATH = ($env.PATH | prepend $env.PWD)
+          source ${{ github.workspace }}/wrapper.nu
+
+          let fake_jdk = ($env.PWD | path join "fake-jdk-format")
+          mkdir ($fake_jdk | path join "bin")
+          touch ($fake_jdk | path join "bin" "java")
+          sk add java 88.0.0-format-test $fake_jdk
+
+          # Flag BEFORE the subcommand -- was already safe under the
+          # ORIGINAL dispatch too, kept here as a baseline.
+          let before = (sk --format=json use java 88.0.0-format-test | complete)
+          if $before.exit_code != 0 {
+            error make {msg: $"expected exit 0 for the --format BEFORE case, got: ($before.stdout)($before.stderr)"}
+          }
+          let before_json = ($before.stdout | str trim | from json)
+          if $before_json.data.action != "activated" {
+            error make {msg: $"expected action=activated, got: ($before.stdout)"}
+          }
+
+          # Flag AFTER the subcommand -- the specific case that used
+          # to be rejected outright by Nushell's own parser before
+          # --format was declared explicitly.
+          let after = (sk use --format=json java 88.0.0-format-test | complete)
+          if $after.exit_code != 0 {
+            error make {msg: $"expected exit 0 for the --format AFTER case, got: ($after.stdout)($after.stderr)"}
+          }
+          let after_json = ($after.stdout | str trim | from json)
+          if $after_json.data.action != "activated" {
+            error make {msg: $"expected action=activated, got: ($after.stdout)"}
+          }
+          if $after_json.schemaVersion != 1 {
+            error make {msg: $"expected a real, well-formed --format=json envelope, got: ($after.stdout)"}
+          }
+          print "OK: --format=json passes through untouched, in both flag positions, on a real Nushell process"
+
   # Real PowerShell wrapper activation -- the single highest-risk,
   # never-verified-on-real-Windows piece of the whole implementation
   # (Invoke-Expression actually applying $env: lines to a live
@@ -359,3 +409,44 @@ jobs:
             throw "PATH still contains the activated JDK's bin directory after clearing"
           }
           Write-Host "OK: JAVA_HOME and PATH correctly cleared via the real PowerShell wrapper"
+
+      # A real, found gap, confirmed directly against a real pwsh 7.4
+      # process: the Invoke-Expression dispatch used to key off
+      # $args[0] alone, so `sk use --format=json java 21...` (flag
+      # AFTER the subcommand) reached Invoke-Expression with sk's own
+      # raw JSON object as its input, failing outright with a real
+      # PowerShell parse error ("Unexpected token ... in expression or
+      # statement"). Fixed by scanning $args for --format anywhere in
+      # init.ps1.tmpl -- this step is the one true end-to-end
+      # confirmation that fix actually works on a real pwsh process,
+      # in both flag positions, not just that the generated script
+      # parses.
+      - name: "Real PowerShell wrapper: --format=json is never eval'd, in either flag position"
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD;$env:PATH"
+          sk.exe init powershell | Out-File -FilePath wrapper-format.ps1 -Encoding utf8
+          . .\wrapper-format.ps1
+
+          $fakeJdk = Join-Path $PWD "fake-jdk-format"
+          New-Item -ItemType Directory -Force -Path (Join-Path $fakeJdk "bin") | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $fakeJdk "bin\java.exe") | Out-Null
+          sk.exe add java 88.0.0-format-test $fakeJdk
+          if ($LASTEXITCODE -ne 0) { throw "sk add failed" }
+
+          # Flag BEFORE the subcommand -- was already safe under the
+          # ORIGINAL dispatch too, kept here as a baseline.
+          $before = sk --format=json use java 88.0.0-format-test
+          if ($LASTEXITCODE -ne 0) { throw "expected exit 0 for the --format BEFORE case, got: $before" }
+          $beforeJson = $before | ConvertFrom-Json
+          if ($beforeJson.data.action -ne "activated") { throw "expected action=activated, got: $before" }
+
+          # Flag AFTER the subcommand -- the specific case that used
+          # to fail with a real Invoke-Expression parse error before
+          # this fix.
+          $after = sk use --format=json java 88.0.0-format-test
+          if ($LASTEXITCODE -ne 0) { throw "expected exit 0 for the --format AFTER case, got: $after" }
+          $afterJson = $after | ConvertFrom-Json
+          if ($afterJson.data.action -ne "activated") { throw "expected action=activated, got: $after" }
+          if ($afterJson.schemaVersion -ne 1) { throw "expected a real, well-formed --format=json envelope, got: $after" }
+          Write-Host "OK: --format=json passes through untouched, in both flag positions, on a real PowerShell process"

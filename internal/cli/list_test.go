@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -201,5 +203,91 @@ func TestPrintManagedGroup_VendorsShareIdenticalColumnAlignment(t *testing.T) {
 		if offset != first {
 			t.Errorf("line %d: path starts at column %d, expected %d (all versions, across BOTH vendors, must align identically) -- full output:\n%s", i, offset, first, out)
 		}
+	}
+}
+
+func TestBuildListJSON_UnknownToolIsAmbiguousTool(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	_, jerr := buildListJSON("not-a-real-tool")
+	if jerr == nil || jerr.Code != ErrCodeAmbiguousTool {
+		t.Fatalf("expected ambiguous_tool, got %+v", jerr)
+	}
+}
+
+// TestBuildListJSON_EmptyInventoryReportsEmptyArrayNotNull confirms
+// the JSON output uses [] for "nothing installed", not a bare JSON
+// null -- an important distinction for any caller that unconditionally
+// iterates data.installed without a nil-check first.
+func TestBuildListJSON_EmptyInventoryReportsEmptyArrayNotNull(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	data, jerr := buildListJSON("java")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if data.Installed == nil {
+		t.Error("expected a non-nil (empty) slice, got nil -- would serialize as JSON null instead of []")
+	}
+	if len(data.Installed) != 0 {
+		t.Errorf("expected zero entries, got %d", len(data.Installed))
+	}
+}
+
+// TestBuildListJSON_ReportsVendorDefaultAndCurrentCorrectly is the
+// main happy-path/invariant test: one installed, multi-vendor version
+// that is BOTH the stored default AND the currently-active one (via
+// the tool's real env var) must report vendor, isDefault, and
+// isCurrent all correctly and simultaneously.
+func TestBuildListJSON_ReportsVendorDefaultAndCurrentCorrectly(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	tool, _ := tooldef.Get("java")
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-temurin")
+
+	if err := os.MkdirAll(filepath.Dir(tool.DefaultPath()), 0o755); err != nil {
+		t.Fatalf("setup (defaults dir) failed: %v", err)
+	}
+	if err := os.WriteFile(tool.DefaultPath(), []byte("21.0.2-temurin"), 0o644); err != nil {
+		t.Fatalf("setup (default file) failed: %v", err)
+	}
+
+	t.Setenv(tool.EnvVar, tool.HomePath(dir))
+
+	data, jerr := buildListJSON("java")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if len(data.Installed) != 1 {
+		t.Fatalf("expected exactly 1 installed entry, got %d: %+v", len(data.Installed), data.Installed)
+	}
+	entry := data.Installed[0]
+	if entry.Vendor == nil || *entry.Vendor != "temurin" {
+		t.Errorf("expected vendor=temurin, got %v", entry.Vendor)
+	}
+	if !entry.IsDefault {
+		t.Error("expected isDefault=true")
+	}
+	if !entry.IsCurrent {
+		t.Error("expected isCurrent=true")
+	}
+}
+
+// TestBuildListJSON_SingleVendorToolAlwaysReportsNilVendor confirms
+// design doc §9 (vendor is null for single-vendor tools) applies to
+// list's own installed entries too, not just use/remove/default's.
+func TestBuildListJSON_SingleVendorToolAlwaysReportsNilVendor(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeMaven(t, home, "3.9.9")
+
+	data, jerr := buildListJSON("maven")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+	if len(data.Installed) != 1 {
+		t.Fatalf("expected exactly 1 installed entry, got %d", len(data.Installed))
+	}
+	if data.Installed[0].Vendor != nil {
+		t.Errorf("expected nil vendor for single-vendor maven, got %v", *data.Installed[0].Vendor)
 	}
 }

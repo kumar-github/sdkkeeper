@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"sdkkeeper/internal/tooldef"
@@ -199,6 +202,177 @@ func TestSortedTools_StableOrder(t *testing.T) {
 			if got[j].Name != first[j].Name {
 				t.Errorf("expected stable order across calls, got %v vs %v", got, first)
 			}
+		}
+	}
+}
+
+func TestDoctorCheckJSONFrom_NoIssuesIsPass(t *testing.T) {
+	c := doctorCheckJSONFrom("dangling_registrations", "dangling registrations", nil)
+	if c.Name != "dangling_registrations" {
+		t.Errorf("expected the given name to be preserved, got %q", c.Name)
+	}
+	if c.Status != "pass" {
+		t.Errorf("expected status=pass for zero issues, got %q", c.Status)
+	}
+	if c.Message != "No dangling registrations" {
+		t.Errorf("expected the plural phrasing in the pass message, got %q", c.Message)
+	}
+}
+
+func TestDoctorCheckJSONFrom_AllWarningsIsWarn(t *testing.T) {
+	issues := []doctorIssue{
+		{warning: true, message: "leftover A"},
+		{warning: true, message: "leftover B"},
+	}
+	c := doctorCheckJSONFrom("leftover_temp_dirs", "leftover temp directories", issues)
+	if c.Status != "warn" {
+		t.Errorf("expected status=warn when every issue is a warning, got %q", c.Status)
+	}
+	if !strings.Contains(c.Message, "leftover A") || !strings.Contains(c.Message, "leftover B") {
+		t.Errorf("expected both issue messages joined together, got %q", c.Message)
+	}
+}
+
+// TestDoctorCheckJSONFrom_AnyNonWarningIsFail mirrors allWarnings'
+// own "any single non-warning issue makes the whole check a failure"
+// rule -- a mix of one real error and one warning must still report
+// fail, not warn.
+func TestDoctorCheckJSONFrom_AnyNonWarningIsFail(t *testing.T) {
+	issues := []doctorIssue{
+		{warning: true, message: "cosmetic leftover"},
+		{warning: false, message: "a real dangling registration"},
+	}
+	c := doctorCheckJSONFrom("dangling_registrations", "dangling registrations", issues)
+	if c.Status != "fail" {
+		t.Errorf("expected status=fail when at least one issue isn't a warning, got %q", c.Status)
+	}
+}
+
+func TestTallyDoctorStatus_CountsCorrectly(t *testing.T) {
+	var summary doctorSummaryJSON
+	tallyDoctorStatus(&summary, "pass")
+	tallyDoctorStatus(&summary, "pass")
+	tallyDoctorStatus(&summary, "warn")
+	tallyDoctorStatus(&summary, "fail")
+	if summary.Pass != 2 || summary.Warn != 1 || summary.Fail != 1 {
+		t.Errorf("expected pass=2 warn=1 fail=1, got %+v", summary)
+	}
+}
+
+// TestEmitDoctorJSON_AllPassReturnsNilError confirms the ordinary
+// success case: a clean doctorData (no failing checks) writes a
+// success envelope and returns nil -- exit code 0.
+func TestEmitDoctorJSON_AllPassReturnsNilError(t *testing.T) {
+	data := &doctorData{
+		Checks:  []doctorCheckJSON{{Name: "dangling_registrations", Status: "pass", Message: "No dangling registrations"}},
+		Summary: doctorSummaryJSON{Pass: 1},
+	}
+	var returned error
+	out := captureStdout(t, func() {
+		returned = emitDoctorJSON(data)
+	})
+	if returned != nil {
+		t.Errorf("expected nil error when nothing failed, got: %v", returned)
+	}
+	if !strings.Contains(out, `"status":"ok"`) {
+		t.Errorf("expected a success envelope, got: %s", out)
+	}
+	if ExitCode(returned) != 0 {
+		t.Errorf("expected ExitCode(nil) = 0, got %d", ExitCode(returned))
+	}
+}
+
+// TestEmitDoctorJSON_FailingCheckStillWritesSuccessEnvelope is THE
+// critical test for design doc §4's own explicit nuance: "the
+// envelope's top-level status is error ONLY if the diagnostic process
+// itself couldn't run... A fail check is a finding, not an invocation
+// error." So even with a failing check, the WRITTEN envelope must
+// still say status:"ok" (never "error", and never carry an "error"
+// key) -- while the returned Go error must still be a *CLIError with
+// doctor_check_failed, resolving to exit code 201 via ExitCode. This
+// success-envelope-plus-nonzero-exit-code combination is unique to
+// doctor among every command in this package.
+func TestEmitDoctorJSON_FailingCheckStillWritesSuccessEnvelope(t *testing.T) {
+	data := &doctorData{
+		Checks: []doctorCheckJSON{
+			{Name: "dangling_registrations", Status: "fail", Message: "1 dangling registration found"},
+		},
+		Summary: doctorSummaryJSON{Fail: 1},
+	}
+	var returned error
+	out := captureStdout(t, func() {
+		returned = emitDoctorJSON(data)
+	})
+	if !strings.Contains(out, `"status":"ok"`) {
+		t.Errorf("expected the envelope itself to report status:ok even with a failing check, got: %s", out)
+	}
+	if strings.Contains(out, `"error"`) {
+		t.Errorf("expected NO \"error\" key in the envelope at all, got: %s", out)
+	}
+	if returned == nil {
+		t.Fatal("expected a non-nil error so the PROCESS exit code reflects the failing check")
+	}
+	var cliErr *CLIError
+	if !errors.As(returned, &cliErr) {
+		t.Fatalf("expected a *CLIError, got: %T (%v)", returned, returned)
+	}
+	if cliErr.Code != ErrCodeDoctorCheckFailed {
+		t.Errorf("expected code=doctor_check_failed, got %q", cliErr.Code)
+	}
+	if ExitCode(returned) != 201 {
+		t.Errorf("expected ExitCode = 201, got %d", ExitCode(returned))
+	}
+}
+
+// TestEmitDoctorJSON_WarnOnlyDoesNotFailTheProcess confirms warn-only
+// findings (design doc §5: "warn-only or all-pass results exit 0")
+// don't trigger the 201 exit path -- only a genuine "fail" status
+// does.
+func TestEmitDoctorJSON_WarnOnlyDoesNotFailTheProcess(t *testing.T) {
+	data := &doctorData{
+		Checks:  []doctorCheckJSON{{Name: "leftover_temp_dirs", Status: "warn", Message: "1 leftover temp directory"}},
+		Summary: doctorSummaryJSON{Warn: 1},
+	}
+	var returned error
+	captureStdout(t, func() {
+		returned = emitDoctorJSON(data)
+	})
+	if returned != nil {
+		t.Errorf("expected nil error for a warn-only result, got: %v", returned)
+	}
+}
+
+// TestBuildDoctorJSON_ReturnsAllNamedChecks is a structural test --
+// confirms every check this package's interactive doctor command runs
+// has a JSON counterpart present, by name, regardless of this
+// sandbox's own network reachability (vendor_reachability's actual
+// pass/fail status is environment-dependent, so this deliberately
+// does not assert on ITS status, only that it's present at all).
+func TestBuildDoctorJSON_ReturnsAllNamedChecks(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	data := buildDoctorJSON(context.Background())
+	wantNames := map[string]bool{
+		"dangling_registrations": false,
+		"incomplete_installs":    false,
+		"stale_defaults":         false,
+		"leftover_temp_dirs":     false,
+		"vendor_reachability":    false,
+	}
+	for _, c := range data.Checks {
+		if _, ok := wantNames[c.Name]; ok {
+			wantNames[c.Name] = true
+		}
+	}
+	for name, seen := range wantNames {
+		if !seen {
+			t.Errorf("expected a %q check to be present, got: %+v", name, data.Checks)
+		}
+	}
+	// Every check's status must be one of the three legal values --
+	// never a stray empty string or anything else.
+	for _, c := range data.Checks {
+		if c.Status != "pass" && c.Status != "warn" && c.Status != "fail" {
+			t.Errorf("check %q has an illegal status %q", c.Name, c.Status)
 		}
 	}
 }

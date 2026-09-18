@@ -87,3 +87,49 @@ func TestSession_ZeroValue_HasTTYFalse(t *testing.T) {
 		t.Error("expected zero-value Session.HasTTY to be false")
 	}
 }
+
+// TestOpen_ForceNoTTYEnvVarSkipsRealTerminal is a regression test for
+// a real, found gap: sk-sequence-check.sh's own assertions on sk's
+// printed confirmation text (`out=$(sk ...)`) had only ever been
+// exercised in non-interactive environments (this project's CI, this
+// package's own sandboxed test runs) where openPlatformTTY already
+// fails on its own (no controlling terminal at all) -- the FIRST real
+// run on an actual, interactive terminal surfaced that /dev/tty is
+// reachable there regardless of any shell-level capture technique, so
+// those assertions saw empty output even though sk printed the
+// correct text (confirmed directly, visibly, in that same real run).
+// SK_FORCE_NO_TTY exists so the test harness can deliberately reach
+// the exact same, already-correct fallback this test confirms it
+// does, without depending on the ambient environment having no real
+// terminal at all.
+func TestOpen_ForceNoTTYEnvVarSkipsRealTerminal(t *testing.T) {
+	t.Setenv("SK_FORCE_NO_TTY", "1")
+	s := Open()
+	defer s.Close()
+
+	if s.HasTTY {
+		t.Error("expected HasTTY=false when SK_FORCE_NO_TTY is set")
+	}
+	if s.Out != os.Stderr {
+		t.Error("expected Out to fall back to os.Stderr when SK_FORCE_NO_TTY is set")
+	}
+	if s.In != os.Stdin {
+		t.Error("expected In to fall back to os.Stdin when SK_FORCE_NO_TTY is set")
+	}
+}
+
+// TestOpen_ForceNoTTYCloseIsSafeNoOp confirms Close on a
+// SK_FORCE_NO_TTY-forced Session behaves exactly like Close on any
+// other Session that fell back to the plain os.Stderr/os.Stdin path
+// (ttyIn/ttyOut are nil, so Close's own nil-guard applies) -- this
+// forced path must never accidentally try to close os.Stderr/os.Stdin
+// themselves.
+func TestOpen_ForceNoTTYCloseIsSafeNoOp(t *testing.T) {
+	t.Setenv("SK_FORCE_NO_TTY", "1")
+	s := Open()
+	s.Close() // must not panic, must not close os.Stderr/os.Stdin
+
+	if _, err := os.Stderr.Write([]byte{}); err != nil {
+		t.Errorf("expected os.Stderr to remain open/usable after Close, got: %v", err)
+	}
+}
