@@ -27,12 +27,9 @@ func newVendorsCmd() *cobra.Command {
 				return err
 			}
 
-			// Tied directly to what `install` can actually do for this
-			// tool, checked generically (does this tool have ANY
-			// registered provider?) rather than a hardcoded "is this
-			// java?" check -- matches install.go's own exact
-			// restriction and stays correct automatically as more
-			// tools gain install support.
+			// Tied to whether this tool has any registered install
+			// provider, matching install.go's own restriction rather
+			// than a hardcoded per-tool check.
 			if len(vendorNamesFor(tool.Name)) == 0 {
 				fmt.Fprintln(session.Out)
 				fmt.Fprintln(session.Out, styles.Neutral.Render(
@@ -51,22 +48,15 @@ func newVendorsCmd() *cobra.Command {
 	}
 }
 
-// vendorsData is `vendors`'s --format=json success `data` shape
-// (design doc §3). A tool with zero registered providers reports an
-// empty "vendors" array, status "ok" -- "no vendors available yet"
-// is a plain fact about that tool, not a failure (same "valid,
-// non-error state" reasoning design doc §3 gives current's `active:
-// null`), so this deliberately does NOT return a jsonError for that
-// case, matching buildVendorsJSON's own doc comment below.
+// vendorsData is vendors' --format=json success shape. A tool with
+// zero registered providers reports an empty array, status ok -- that
+// is a plain fact, not a failure.
 type vendorsData struct {
 	Tool    string   `json:"tool"`
 	Vendors []string `json:"vendors"`
 }
 
-// buildVendorsJSON is `vendors`'s --format=json counterpart. Always
-// succeeds once the tool name itself is recognized -- an empty
-// Vendors slice for a tool with no install support yet is itself the
-// correct, complete answer, not an error condition.
+// buildVendorsJSON always succeeds once the tool name is recognized.
 func buildVendorsJSON(toolName string) (*vendorsData, *jsonError) {
 	tool, ok := tooldef.Get(toolName)
 	if !ok {

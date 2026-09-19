@@ -15,16 +15,12 @@ import (
 	"sdkkeeper/internal/tooldef"
 )
 
-// doctorIssue is one problem found by a single check -- printed as an
-// indented sub-line under that check's own summary line.
+// doctorIssue is one problem found by a single check, printed as an
+// indented sub-line under that check's summary line.
 type doctorIssue struct {
-	// warning marks a cosmetic, safe-to-ignore issue (e.g. leftover
-	// temp files) rather than something that would actually break a
-	// real command -- rendered with a different glyph so the two
-	// categories aren't visually conflated.
-	warning bool
+	warning bool // cosmetic/safe-to-ignore vs. an actual failure
 	message string
-	fix     string // optional; empty if there's nothing actionable to suggest
+	fix     string // optional
 }
 
 func newDoctorCmd() *cobra.Command {
@@ -64,10 +60,9 @@ func newDoctorCmd() *cobra.Command {
 	}
 }
 
-// printCheck renders one check's result -- a single "✓ No X" line if
-// issues is empty, or a "✗/⚠ N X found:" header followed by each
-// issue as an indented sub-line with its own suggested fix. Returns
-// the count actually printed, for the overall summary tally.
+// printCheck renders one check's result: "✓ No X" if issues is empty,
+// or a "✗/⚠ N X found:" header with each issue as a sub-line. Returns
+// the count printed, for the overall summary tally.
 func printCheck(singular, plural string, issues []doctorIssue) int {
 	if len(issues) == 0 {
 		fmt.Fprintln(session.Out, styles.Success.Render(fmt.Sprintf("\u2713 No %s", plural)))
@@ -79,13 +74,6 @@ func printCheck(singular, plural string, issues []doctorIssue) int {
 		label = singular
 	}
 	glyph := "\u2717"
-	// A real bug found via actual use: a "⚠" (cosmetic, safe-to-
-	// ignore) issue was previously rendered in the exact SAME red as
-	// a genuine "✗" failure -- making the two visually
-	// indistinguishable, which defeats the entire point of having a
-	// separate warning glyph at all. Now uses its own, distinct
-	// amber Warning style -- see Styles' own doc comment for the
-	// full convention this follows.
 	style := styles.Error
 	if allWarnings(issues) {
 		glyph = "\u26a0"
@@ -111,12 +99,7 @@ func allWarnings(issues []doctorIssue) bool {
 }
 
 // checkDanglingRegistrations finds every `add`-registered (symlinked)
-// entry whose real target no longer resolves -- the target was moved
-// or deleted outside sk's knowledge. Directly the same class of bug
-// as a real, documented SDKMAN issue found during design research
-// (candidates/java/current resolving to a target that had moved),
-// just checked explicitly rather than discovered via a confusing
-// downstream failure in some other tool.
+// entry whose real target no longer resolves.
 func checkDanglingRegistrations() []doctorIssue {
 	var issues []doctorIssue
 	for _, tool := range sortedTools() {
@@ -139,13 +122,10 @@ func checkDanglingRegistrations() []doctorIssue {
 	return issues
 }
 
-// checkIncompleteInstalls finds every real, sk-installed (non-symlink)
-// version directory that looks structurally incomplete -- its bin
-// directory is missing or empty. sk's own installer uses an atomic
-// rename specifically to prevent this on a clean success/failure
-// path, but a SIGKILL mid-install (which skips Go's defer-based
-// cleanup entirely) or a manual partial deletion could still produce
-// one.
+// checkIncompleteInstalls finds every real, sk-installed version
+// directory whose bin directory is missing or empty -- possible after
+// a SIGKILL mid-install (which skips Go's defer-based cleanup) or a
+// manual partial deletion.
 func checkIncompleteInstalls() []doctorIssue {
 	var issues []doctorIssue
 	for _, tool := range sortedTools() {
@@ -170,11 +150,8 @@ func checkIncompleteInstalls() []doctorIssue {
 }
 
 // checkStaleDefaults finds every tool whose stored default no longer
-// corresponds to anything actually installed or registered. `remove`
-// already clears a default when IT deletes the exact matching
-// version, but a manual `rm -rf` outside sk, or a hand-edited defaults
-// file, would leave a stale reference `remove` never got a chance to
-// catch.
+// corresponds to anything installed -- possible after a manual
+// `rm -rf` or a hand-edited defaults file.
 func checkStaleDefaults() []doctorIssue {
 	var issues []doctorIssue
 	for _, tool := range sortedTools() {
@@ -203,13 +180,10 @@ func checkStaleDefaults() []doctorIssue {
 	return issues
 }
 
-// checkLeftoverTempDirs finds anything left behind in
-// ~/.sdkkeeper/tmp -- this directory is supposed to be emptied after
-// every install, success or failure, but a SIGKILL mid-download or
-// mid-extraction skips that cleanup entirely (Go's defer statements
-// don't run on a killed process), leaving orphaned data behind
-// indefinitely. Marked as warnings, not errors -- harmless clutter,
-// not something that breaks any real command.
+// checkLeftoverTempDirs finds anything left in ~/.sdkkeeper/tmp,
+// which should be emptied after every install but can survive a
+// SIGKILL mid-download. Marked as warnings, not errors -- harmless
+// clutter.
 func checkLeftoverTempDirs() []doctorIssue {
 	entries, err := os.ReadDir(tooldef.TempRoot())
 	if err != nil {
@@ -227,18 +201,11 @@ func checkLeftoverTempDirs() []doctorIssue {
 	return issues
 }
 
-// printVendorReachability checks each known vendor's API directly --
-// deliberately only here, inside doctor, as an explicit, user-
-// initiated check. SDKMAN performs an automatic reachability check on
-// EVERY startup; sk deliberately does not, consistent with this whole
-// project's "nothing automatic, always explicit" principle. A short
-// timeout keeps a fully offline machine from hanging here indefinitely.
-//
-// Iterates every registered tool's own providers generically (via
-// sortedTools + vendorNamesFor), rather than a flat, hardcoded vendor
-// list -- a future tool's providers are picked up automatically the
-// moment they're registered in providers.go, with zero changes needed
-// here.
+// printVendorReachability checks each vendor's API, only here inside
+// doctor as an explicit, user-initiated check (unlike SDKMAN, which
+// does this on every startup). A short timeout avoids hanging on an
+// offline machine. Iterates every registered tool/provider
+// generically, so a future tool is picked up automatically.
 func printVendorReachability(ctx context.Context) int {
 	problems := 0
 	for _, tool := range sortedTools() {
@@ -258,29 +225,13 @@ func printVendorReachability(ctx context.Context) int {
 	return problems
 }
 
-// toolOrder is the deliberate order every tool-iterating check in this
-// file presents tools in -- Java first, then Maven and Gradle (which
-// both require Java as a prerequisite), matching the real dependency
-// relationship already established elsewhere in this codebase
-// (tooldef.Tool.RequiresJava), not an alphabetical accident.
-//
-// A real, confirmed regression this fixes: sortedTools previously
-// used sort.Strings() directly on tooldef.Registry's own map keys --
-// alphabetically "gradle" < "java" < "maven", so doctor's own output
-// actually printed Gradle FIRST, ahead of Java, silently reordering a
-// genuinely meaningful sequence into an accidental one. This is the
-// exact same class of bug providersByTool's own doc comment already
-// describes catching once, for VENDOR ordering within a tool -- this
-// is the same mistake at the TOOL level, simply never caught there
-// until now.
+// toolOrder is the deliberate presentation order -- Java first, then
+// Maven and Gradle, which both require Java (tooldef.Tool.RequiresJava)
+// -- not alphabetical (plain sort.Strings would put Gradle first).
 var toolOrder = []string{"java", "maven", "gradle"}
 
-// sortedTools returns every registered tool in the deliberate order
-// above, appending any tool NOT listed there (a future addition to
-// tooldef.Registry that toolOrder hasn't been updated for yet) at the
-// end, alphabetically -- so a forgotten update here degrades to the
-// old, at-least-deterministic behavior for anything unrecognized,
-// rather than silently dropping it from doctor's output entirely.
+// sortedTools returns every registered tool in toolOrder, appending
+// any tool not listed there at the end, alphabetically.
 func sortedTools() []tooldef.Tool {
 	seen := make(map[string]bool, len(toolOrder))
 	tools := make([]tooldef.Tool, 0, len(tooldef.Registry))
@@ -306,8 +257,8 @@ func sortedTools() []tooldef.Tool {
 	return tools
 }
 
-// doctorCheckJSON and doctorSummaryJSON/doctorData are `doctor`'s
-// --format=json `data` shape (design doc §4).
+// doctorCheckJSON/doctorSummaryJSON/doctorData are doctor's
+// --format=json shape.
 type doctorCheckJSON struct {
 	Name    string `json:"name"`
 	Status  string `json:"status"`
@@ -325,17 +276,10 @@ type doctorData struct {
 	Summary doctorSummaryJSON `json:"summary"`
 }
 
-// buildDoctorJSON is `doctor`'s --format=json counterpart. Reuses the
-// exact same checkX functions the interactive path's printCheck calls
-// -- those are already pure (no printing at all; only printCheck
-// itself prints) -- so the JSON and text paths can never disagree
-// about which issues were actually found, only about how they're
-// rendered. Vendor reachability is folded into ONE named check here
-// ("vendor_reachability"), unlike printVendorReachability's own
-// per-vendor inline printing, to fit the same {name, status, message}
-// shape every other check uses -- one issue-message per unreachable
-// vendor, joined together, rather than a separate top-level check per
-// vendor with no shared name to group them under.
+// buildDoctorJSON reuses the same, pure checkX functions the
+// interactive path's printCheck calls, so JSON and text can never
+// disagree about which issues were found. Vendor reachability is
+// folded into one named check here, rather than per-vendor.
 func buildDoctorJSON(ctx context.Context) *doctorData {
 	type namedCheck struct {
 		name   string
@@ -364,9 +308,8 @@ func buildDoctorJSON(ctx context.Context) *doctorData {
 	return &doctorData{Checks: checks, Summary: summary}
 }
 
-// doctorCheckJSONFrom mirrors printCheck's own pass/warn/fail
-// coloring rule exactly (same allWarnings condition), just building a
-// struct instead of printing styled text.
+// doctorCheckJSONFrom mirrors printCheck's own pass/warn/fail rule,
+// building a struct instead of printing.
 func doctorCheckJSONFrom(name, plural string, issues []doctorIssue) doctorCheckJSON {
 	if len(issues) == 0 {
 		return doctorCheckJSON{Name: name, Status: "pass", Message: fmt.Sprintf("No %s", plural)}
@@ -383,8 +326,7 @@ func doctorCheckJSONFrom(name, plural string, issues []doctorIssue) doctorCheckJ
 }
 
 // buildVendorReachabilityCheckJSON mirrors printVendorReachability's
-// own reachability loop exactly, collecting results into one named
-// check instead of printing one line per vendor.
+// loop, collecting results into one named check.
 func buildVendorReachabilityCheckJSON(ctx context.Context) doctorCheckJSON {
 	var problems []string
 	reachable := 0
@@ -420,19 +362,10 @@ func tallyDoctorStatus(summary *doctorSummaryJSON, status string) {
 	}
 }
 
-// emitDoctorJSON is doctor's own emitter, deliberately NOT the shared
-// emitJSON every other command uses -- design doc §4's own nuance:
-// "the envelope's top-level status is error ONLY if the diagnostic
-// process itself couldn't run... never for reporting a failed check.
-// A fail check is a finding, not an invocation error." So this always
-// writes a SUCCESS envelope (nothing in this package's current check
-// functions represents "doctor itself couldn't run" as a distinct
-// condition -- every checkX function already swallows its own scan
-// errors and continues, matching the interactive path's existing
-// leniency), but still returns a *CLIError for exit code 201 (design
-// doc §5: "doctor exits 201 only when a check is fail") whenever the
-// summary shows at least one failing check -- a genuine case of a
-// SUCCESSFUL envelope paired with a non-zero process exit code.
+// emitDoctorJSON is doctor's own emitter, not the shared emitJSON:
+// a failing check is a finding, not an invocation error, so the
+// envelope always reports success -- but still returns a *CLIError
+// for exit code 201 when the summary shows at least one failure.
 func emitDoctorJSON(data *doctorData) error {
 	writeJSONEnvelope(jsonEnvelope{SchemaVersion: schemaVersion, Status: "ok", Data: data})
 	if data.Summary.Fail > 0 {

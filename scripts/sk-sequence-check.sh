@@ -412,6 +412,31 @@ print "  NOTE: this specific case cannot be asserted non-interactively -- a real
 print "  TTY is required to drive the picker. Confirm manually on a real terminal."
 sk remove java 21.0.2-temurin >/dev/null 2>&1
 
+step "D3. No version AND no real terminal at all (SK_FORCE_NO_TTY is already set for this whole script) -- a clean, actionable fallback, not the picker's own raw '/dev/tty could not be opened' wording"
+fake_jdk "$CANDIDATES/JDK-21.0.2-temurin" "21.0.2-temurin"
+use_no_tty_stdout=$(mktemp)
+use_no_tty_stderr=$(mktemp)
+"$SK_BIN" use java > "$use_no_tty_stdout" 2> "$use_no_tty_stderr"
+use_no_tty_exit=$?
+print "  stdout: $(cat "$use_no_tty_stdout")"
+print "  stderr: $(cat "$use_no_tty_stderr")"
+assert_not_contains "$(cat "$use_no_tty_stderr")" "/dev/tty" "the picker's own low-level wording never reaches the user"
+assert_contains "$(cat "$use_no_tty_stderr")" "a version is required" "a clear, actionable message instead"
+assert_exit_code "$use_no_tty_exit" "101" "process exit code 101 (version_required) -- the SAME code --format=json's own equivalent case uses"
+rm -f "$use_no_tty_stdout" "$use_no_tty_stderr"
+
+remove_no_tty_stdout=$(mktemp)
+remove_no_tty_stderr=$(mktemp)
+"$SK_BIN" remove java > "$remove_no_tty_stdout" 2> "$remove_no_tty_stderr"
+remove_no_tty_exit=$?
+print "  stdout: $(cat "$remove_no_tty_stdout")"
+print "  stderr: $(cat "$remove_no_tty_stderr")"
+assert_not_contains "$(cat "$remove_no_tty_stderr")" "/dev/tty" "same clean fallback for remove"
+assert_contains "$(cat "$remove_no_tty_stderr")" "a version is required" "same clear, actionable message"
+assert_exit_code "$remove_no_tty_exit" "101" "process exit code 101 (version_required)"
+rm -f "$remove_no_tty_stdout" "$remove_no_tty_stderr"
+sk remove java 21.0.2-temurin >/dev/null 2>&1
+
 # ════════════════════════════════════════════════════════════════
 section "E. default + list interaction (the (current)/(default) tags)"
 # ════════════════════════════════════════════════════════════════
@@ -830,6 +855,22 @@ assert_exit_code "$SK_EXIT" "0" "process exit code 0"
 assert_true "$([[ -z "${JAVA_HOME:-}" ]] && echo true || echo false)" \
     "JAVA_HOME is genuinely UNCHANGED -- --format=json only reports what activation would do (design doc §6); a caller must export it itself"
 
+step "use --format=json's envVar/envValue/binPath are ENOUGH for a caller to fully reproduce the eval effect itself, with zero guessing -- the direct answer to 'what's the use of this if it can't mutate the shell'"
+assert_contains "$SK_OUT" '"envVar":"JAVA_HOME"' "reports the correct env var name for java"
+json_env_value=$(print -r -- "$SK_OUT" | sed -n 's/.*"envValue":"\([^"]*\)".*/\1/p')
+json_bin_path=$(print -r -- "$SK_OUT" | sed -n 's/.*"binPath":"\([^"]*\)".*/\1/p')
+assert_true "$([[ -n "$json_env_value" ]] && echo true || echo false)" "envValue was actually extractable from the JSON"
+assert_true "$([[ -n "$json_bin_path" ]] && echo true || echo false)" "binPath was actually extractable from the JSON"
+# The actual point being proven: acting on JUST these two fields --
+# nothing else, no private knowledge of sk's own directory layout --
+# reproduces the exact effect `eval` would have had.
+export JAVA_HOME="$json_env_value"
+export PATH="$json_bin_path:$PATH"
+assert_contains "$(command -v java)" "JDK-21.0.2-temurin/bin/java" "java now resolves through the JDK this JSON response described, using ONLY its own envVar/envValue/binPath fields"
+assert_true "$([[ "$JAVA_HOME" == "$CANDIDATES/JDK-21.0.2-temurin"* ]] && echo true || echo false)" "JAVA_HOME matches sk's own real, internal path exactly"
+unset JAVA_HOME
+sk use java null > /dev/null 2>&1
+
 step "default + list + current agree once JAVA_HOME is exported the same way a real caller of --format=json would"
 capture_sk_direct --format=json default java 21.0.2-temurin
 print -r -- "$SK_OUT"
@@ -862,11 +903,23 @@ step "remove --format=json reports wasCurrent/wasDefault -- a real, reported bug
 fake_jdk "$CANDIDATES/JDK-17.0.9-temurin" "17.0.9-temurin"
 capture_sk_direct --format=json default java 17.0.9-temurin
 export JAVA_HOME="$CANDIDATES/JDK-17.0.9-temurin"
+export PATH="$CANDIDATES/JDK-17.0.9-temurin/bin:$PATH"
 capture_sk_direct --format=json remove java 17.0.9-temurin
 print -r -- "$SK_OUT"
 assert_contains "$SK_OUT" '"wasCurrent":true' "reports wasCurrent:true -- this exact version was JAVA_HOME"
 assert_contains "$SK_OUT" '"wasDefault":true' "reports wasDefault:true -- this exact version was the stored default"
-unset JAVA_HOME
+assert_contains "$SK_OUT" '"envVar":"JAVA_HOME"' "reports which env var a caller needs to unset"
+assert_contains "$SK_OUT" "\"binPath\":\"$CANDIDATES/JDK-17.0.9-temurin/bin\"" "reports the exact PATH entry a caller needs to strip"
+# Demonstrated end to end, not just checked as text: a caller acting
+# on wasCurrent/envVar/binPath ALONE -- no private knowledge of sk's
+# own layout -- ends up in EXACTLY the clean state interactive
+# `sk remove` would have left this shell in.
+json_removed_env_var=$(print -r -- "$SK_OUT" | sed -n 's/.*"envVar":"\([^"]*\)".*/\1/p')
+json_removed_bin_path=$(print -r -- "$SK_OUT" | sed -n 's/.*"binPath":"\([^"]*\)".*/\1/p')
+unset "$json_removed_env_var"
+PATH="${PATH//$json_removed_bin_path:/}"
+assert_true "$([[ -z "${JAVA_HOME:-}" ]] && echo true || echo false)" "JAVA_HOME correctly cleared by a caller acting on wasCurrent+envVar alone"
+assert_true "$([[ "$PATH" != *"$json_removed_bin_path"* ]] && echo true || echo false)" "the removed JDK's bin directory is correctly gone from PATH"
 
 step "remove --format=json reports wasCurrent/wasDefault false when neither applies -- not a hardcoded true"
 fake_jdk "$CANDIDATES/JDK-11-temurin" "11-temurin"

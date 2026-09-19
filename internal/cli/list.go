@@ -20,9 +20,7 @@ func newListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
 
-			// --format=json is a pure, read-only report -- branches off
-			// before the interactive tool-lookup/session.Out/grouped-
-			// text-rendering logic below entirely.
+			// --format=json is a pure, read-only report.
 			if outputFormat == FormatJSON {
 				data, jerr := buildListJSON(toolName)
 				return emitJSON(data, jerr)
@@ -356,8 +354,7 @@ func buildPickerGroups(tool tooldef.Tool, versions []inventory.Version) []picker
 	return groups
 }
 
-// listInstalledEntry and listData are `list`'s --format=json success
-// `data` shape (design doc §3).
+// listInstalledEntry/listData are list's --format=json success shape.
 type listInstalledEntry struct {
 	Version   string  `json:"version"`
 	Vendor    *string `json:"vendor"`
@@ -370,23 +367,13 @@ type listData struct {
 	Installed []listInstalledEntry `json:"installed"`
 }
 
-// buildListJSON is `list`'s --format=json counterpart -- no picker,
-// no session.Out, no vendor/managed-vs-external grouping (the JSON
-// shape design doc §3 gives is a single flat "installed" array; the
-// managed/external distinction and vendor sub-grouping are purely a
-// TEXT-rendering concern this schema doesn't have a slot for --
-// External entries are still included in the flat list, exactly as
-// `list`'s own text output includes them, just without a separate
-// section for them here).
-//
-// Deliberately reuses the exact SAME currentVersion/defaultVersion
-// computation the interactive path uses (findActiveVersion,
-// readDefault) -- this is precisely the cross-command invariant
-// design doc §3 calls out ("list's isCurrent:true entry must always
-// agree with current's active value for the same tool"): both this
-// function and buildCurrentJSON call findActiveVersion the same way,
-// against the same inventory.Scan result, so there is no second,
-// independently-arrived-at notion of "current" that could disagree.
+// buildListJSON reports a single flat "installed" array -- the
+// managed/external distinction and vendor grouping are text-rendering
+// concerns this schema doesn't cover, though external entries are
+// still included in the flat list. Uses the same findActiveVersion/
+// readDefault calls as buildCurrentJSON, against the same
+// inventory.Scan result, so list's isCurrent can never disagree with
+// current's own active value.
 func buildListJSON(toolName string) (*listData, *jsonError) {
 	tool, ok := tooldef.Get(toolName)
 	if !ok {

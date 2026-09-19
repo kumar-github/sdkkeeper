@@ -1,10 +1,7 @@
 // Package temurin implements registry.Provider against the Adoptium
-// API (api.adoptium.net), which serves Eclipse Temurin builds -- the
-// mainstream-default JDK vendor (design doc §7). Field names and
-// OS/arch vocabulary below are taken directly from Adoptium's own
-// published documentation and example scripts (api.adoptium.net docs +
-// cookbook.adoc) and, where noted, confirmed against real, live
-// responses retrieved directly by the user.
+// API (api.adoptium.net), which serves Eclipse Temurin builds -- this
+// project's mainstream-default JDK vendor. Field names and OS/arch
+// vocabulary are taken from Adoptium's own published documentation.
 package temurin
 
 import (
@@ -21,10 +18,8 @@ import (
 )
 
 // DefaultBaseURL is the real Adoptium API. Overridable (see
-// Provider.BaseURL) specifically so this package can be tested against
-// a local httptest.Server instead of the live network -- this sandbox's
-// own network allowlist doesn't include api.adoptium.net, so this is
-// how the fetch/parse/error-handling logic is verified here.
+// Provider.BaseURL) so this package can be tested against a local
+// httptest.Server instead of the live network.
 const DefaultBaseURL = "https://api.adoptium.net"
 
 // Provider implements registry.Provider for Temurin.
@@ -54,13 +49,7 @@ func (p *Provider) client() *http.Client {
 }
 
 // adoptiumOS translates Go's runtime.GOOS to Adoptium's own vocabulary
-// ("mac", not "darwin"/"macos") -- confirmed directly from Adoptium's
-// published docs (cookbook.adoc: "one of linux, windows, mac, solaris,
-// aix, or alpine-linux").
-// adoptiumOS translates Go's runtime.GOOS to Adoptium's own vocabulary
-// -- confirmed directly from Adoptium's own published API docs and
-// CI/CD cookbook (both list "windows" as a real, valid {os} value,
-// alongside "linux"/"mac"/"alpine-linux"/"aix"/"solaris").
+// ("mac", not "darwin"), per Adoptium's published docs.
 func adoptiumOS(goos string) (string, error) {
 	switch goos {
 	case "darwin":
@@ -75,8 +64,7 @@ func adoptiumOS(goos string) (string, error) {
 }
 
 // adoptiumArch translates Go's runtime.GOARCH to Adoptium's own
-// vocabulary ("aarch64", not "arm64") -- confirmed directly from
-// Adoptium's published docs.
+// vocabulary ("aarch64", not "arm64"), per Adoptium's published docs.
 func adoptiumArch(goarch string) (string, error) {
 	switch goarch {
 	case "amd64":
@@ -90,15 +78,8 @@ func adoptiumArch(goarch string) (string, error) {
 
 // featureReleasesResponse mirrors the JSON shape returned by
 // /v3/assets/feature_releases/{major}/ga, restricted to the fields
-// actually needed here. binary.package.name/.checksum/.link were
-// correctly guessed from Adoptium's PowerShell cookbook example --
-// but the top-level version object's real key is "version_data", NOT
-// "version" as originally assumed and never verified. That wrong
-// assumption was a real, live bug: since the JSON key never matched,
-// OpenJDKVersion/Semver silently deserialized as empty strings for
-// every release, meaning NO version could ever match, regardless of
-// what was requested. Confirmed and fixed against a real, live
-// response, retrieved by the user directly via curl+jq.
+// needed here. The top-level version object's real key is
+// "version_data", not "version" -- verified against a live response.
 type featureReleasesResponse []struct {
 	Version struct {
 		OpenJDKVersion string `json:"openjdk_version"`
@@ -113,13 +94,9 @@ type featureReleasesResponse []struct {
 	} `json:"binaries"`
 }
 
-// fetchFeatureReleases performs the actual HTTP call + JSON parsing
-// shared by ResolveAsset and ListPatchVersions -- both need the exact
-// same data (every release of one major/feature version, for one
-// OS/arch), just used differently (search for one exact match vs.
-// list every version found). Extracted here so that shared logic --
-// including the page_size fix below -- is written, and fixed, in
-// exactly one place.
+// fetchFeatureReleases performs the HTTP call + JSON parsing shared
+// by ResolveAsset and ListPatchVersions -- both need every release of
+// one major/feature version for one OS/arch, just used differently.
 func (p *Provider) fetchFeatureReleases(ctx context.Context, major, goos, goarch string) (featureReleasesResponse, error) {
 	os_, err := adoptiumOS(goos)
 	if err != nil {
@@ -130,16 +107,10 @@ func (p *Provider) fetchFeatureReleases(ctx context.Context, major, goos, goarch
 		return nil, err
 	}
 
-	// page_size is deliberately large (not the API's small default,
-	// confirmed live to be 10) -- a real, confirmed bug: without this,
-	// an older patch (e.g. 21.0.2, superseded by 13+ newer releases of
-	// the same major by now) silently fell outside the default page
-	// and was reported as "not found" even though it's a completely
-	// real, valid, installable release. 100 is a generous margin
-	// above the 14 total releases confirmed for major 21 -- some
-	// long-lived majors (e.g. 8, maintained since 2014) may have more
-	// history than 21 does, so this isn't tuned to exactly what 21
-	// happens to need today.
+	// page_size deliberately large (the API's default is only 10) --
+	// without this, an older patch superseded by many newer releases
+	// of the same major could fall outside the default page and be
+	// reported as "not found" even though it's a valid release.
 	url := fmt.Sprintf("%s/v3/assets/feature_releases/%s/ga?os=%s&architecture=%s&image_type=jdk&page_size=100",
 		p.baseURL(), major, os_, arch)
 
@@ -206,20 +177,10 @@ func (p *Provider) ResolveAsset(ctx context.Context, version, goos, goarch strin
 }
 
 // ListPatchVersions implements registry.Provider. Returns every patch
-// version found for major, explicitly sorted newest-first.
-//
-// A real, confirmed risk this guards against, even though not yet
-// symptomatic here the way it was for Liberica (see that provider's
-// own ListPatchVersions comment): this used to rely on an UNVERIFIED
-// assumption that Adoptium's own API always returns results already
-// sorted newest-first, based on a one-time, point-in-time observation
-// rather than a documented guarantee. Confirmed directly from
-// Adoptium's own API cookbook: getting a genuinely sorted response
-// requires EXPLICITLY passing sort_method=DATE&sort_order=DESC --
-// this provider's own request never did, so any apparent ordering was
-// incidental, not contractual. Sorting explicitly here removes that
-// assumption entirely, regardless of whatever order the API actually
-// happens to return.
+// version found for major, explicitly sorted newest-first -- the API
+// only returns a genuinely sorted response when passing
+// sort_method=DATE&sort_order=DESC explicitly, which this request
+// doesn't, so sorting here doesn't rely on the API's own ordering.
 func (p *Provider) ListPatchVersions(ctx context.Context, major, goos, goarch string) ([]string, error) {
 	parsed, err := p.fetchFeatureReleases(ctx, major, goos, goarch)
 	if err != nil {
@@ -246,10 +207,8 @@ func (p *Provider) ListPatchVersions(ctx context.Context, major, goos, goarch st
 
 // compareVersions compares two dot-separated version strings
 // numerically, component by component -- a missing trailing component
-// compares as 0, so versions with different numbers of components
-// (e.g. "21" vs "21.0.2") still compare correctly. Mirrors the
-// identical, already-established pattern in apache's and gradle's own
-// compareVersions (and liberica's, added for the same reason).
+// compares as 0, so versions with different lengths still compare
+// correctly.
 func compareVersions(a, b string) int {
 	aParts := strings.Split(a, ".")
 	bParts := strings.Split(b, ".")
@@ -268,8 +227,7 @@ func compareVersions(a, b string) int {
 	return 0
 }
 
-// availableReleasesResponse mirrors /v3/info/available_releases,
-// confirmed directly from Adoptium's own cookbook example.
+// availableReleasesResponse mirrors /v3/info/available_releases.
 type availableReleasesResponse struct {
 	AvailableReleases []int `json:"available_releases"`
 	// AvailableLTSReleases was already being fetched (same response,
@@ -335,30 +293,17 @@ func (p *Provider) ListMajorVersionsWithLTS(ctx context.Context) ([]registry.Maj
 }
 
 // stripBuildMetadata removes a vendor build-number suffix like "+13"
-// from a version string, e.g. "21.0.2+13" -> "21.0.2". Adoptium's own
-// version strings always include this build metadata, but users
-// naturally think and type in terms of the bare major.minor.patch
-// triple, matching every other command in this tool (e.g. "sk use
-// java 21.0.2", never "21.0.2+13") -- without stripping this, an exact
-// string match would never succeed for a normally-typed version.
+// from a version string, e.g. "21.0.2+13" -> "21.0.2", so a normally-
+// typed version (never including the build number) can exact-match.
 //
-// Simplification accepted for now: if the SAME stripped version has
-// multiple build revisions (e.g. both "21.0.2+13" and "21.0.2+14"
-// exist), the first one encountered in the API's response order wins.
-// Pinning to an exact build number is not supported yet -- a contained
-// future addition, not needed for the common case.
+// If the same stripped version has multiple build revisions, the
+// first encountered in the API's response order wins -- pinning to
+// an exact build number isn't supported.
 //
-// Confirmed real quirk (via a live response, retrieved by the user):
-// for a version with a 4-component patch number (e.g. openjdk_version
-// "21.0.12.1+1-LTS"), Adoptium's separate `semver` field encodes that
-// differently and, after stripping, is actually SHORTER --
-// "21.0.12+101.0.LTS" strips to "21.0.12", silently dropping the ".1"
-// that openjdk_version correctly preserves ("21.0.12.1"). Matching
-// still ORs both fields (see ResolveAsset), so this doesn't cause
-// openjdk_version's correct full match to fail -- but it does mean a
-// user typing the shorter "21.0.12" (omitting the real ".1") could
-// match via semver when the fully-correct version actually has that
-// 4th component. Accepted as a known, narrow imprecision for now.
+// For a 4-component patch (e.g. "21.0.12.1+1-LTS"), the semver field
+// strips shorter than openjdk_version, dropping the ".1" component.
+// Matching ORs both fields (see ResolveAsset), so this is a known,
+// narrow imprecision, not a correctness bug.
 func stripBuildMetadata(version string) string {
 	if i := strings.IndexByte(version, '+'); i != -1 {
 		return version[:i]

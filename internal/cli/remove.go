@@ -11,15 +11,11 @@ import (
 	"sdkkeeper/internal/tooldef"
 )
 
-// removeVersion deletes v from disk, using the correct mechanism for
-// each case -- the one thing this command must never get backwards.
-// For a symlink (v.External, registered via `add`), only the symlink
-// itself is removed (os.Remove) -- the real files it points at belong
-// to the user, not sk, and must never be touched. For a real,
-// genuinely sk-installed directory, the actual files are removed
-// (os.RemoveAll). Extracted as its own function specifically so this
-// critical distinction can be tested directly, without needing a real
-// terminal session.
+// removeVersion deletes v from disk using the correct mechanism for
+// each case. A symlink (v.External, registered via `add`) has only
+// the symlink itself removed -- the real files it points at belong to
+// the user, not sk. A real, sk-installed directory is removed
+// entirely. Extracted so this distinction can be tested directly.
 func removeVersion(v inventory.Version) error {
 	if v.External {
 		return os.Remove(v.Path)
@@ -42,11 +38,6 @@ func newRemoveCmd() *cobra.Command {
 				version = args[1]
 			}
 
-			// --format=json branches off before the interactive tool
-			// lookup/picker/session.Out machinery below -- same
-			// reasoning as use.go's own branch (design doc §2/§6):
-			// never launches a picker, reports version_required
-			// immediately instead when no version is given.
 			if outputFormat == FormatJSON {
 				data, jerr := resolveRemoveJSON(toolName, version)
 				return emitJSON(data, jerr)
@@ -57,14 +48,7 @@ func newRemoveCmd() *cobra.Command {
 				return err
 			}
 
-			// No version given -- show a picker, matching `use`'s own
-			// established "no arg = show a picker" pattern. A real
-			// bug caught via actual use: this command used to require
-			// EXACTLY 2 args, so `sk remove java` with no version
-			// failed cobra's own arg-count validation and, since
-			// root.go silences errors, exited with no output
-			// whatsoever -- a genuinely confusing silent no-op rather
-			// than either removing something or explaining why not.
+			// No version given -- show a picker, matching `use`.
 			if version == "" {
 				versions, err := inventory.Scan(tool)
 				if err != nil {
@@ -75,6 +59,12 @@ func newRemoveCmd() *cobra.Command {
 					fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("No %s versions found to remove.", tool.DisplayName)))
 					return nil
 				}
+				if !session.HasTTY {
+					err := versionRequiredNoTTY(tool, "remove")
+					fmt.Fprintln(session.Out)
+					fmt.Fprintln(session.Out, styles.Error.Render(err.Error()))
+					return err
+				}
 				title := fmt.Sprintf("Select %s version to remove", tool.DisplayName)
 				chosen, err := picker.RunGrouped(session, title, buildPickerGroups(tool, versions), "")
 				if err != nil {
@@ -84,21 +74,12 @@ func newRemoveCmd() *cobra.Command {
 				}
 				if chosen == "" {
 					fmt.Fprintln(session.Out)
-					// Styled Detail (neutral), not Error -- a picker
-					// being cancelled is the user's own deliberate
-					// choice, not a failure; see Styles' own doc
-					// comment for the full convention.
 					fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("No %s version selected to remove.", tool.DisplayName)))
 					return ErrCancelled
 				}
 				version = chosen
 			}
 
-			// Reuses the same inventory.Find/FormatNotFound already
-			// proven by `use`'s own not-found path -- v.External tells
-			// us directly whether this is a real, sk-installed
-			// directory or a symlink (registered via `add`), no need
-			// to re-derive that here.
 			v, ok := inventory.Find(tool, version)
 			if !ok {
 				versions, _ := inventory.Scan(tool)
@@ -108,37 +89,20 @@ func newRemoveCmd() *cobra.Command {
 				return fmt.Errorf("not found")
 			}
 
-			// Checked BEFORE deletion, deliberately -- with the
-			// HomePath filesystem-probing fix (see tooldef.Tool's own
-			// doc comment), calling it AFTER the directory is gone
-			// would give a different, wrong answer (the probe would
-			// no longer find "Contents/Home" even if it existed
-			// before deletion), so this must capture the comparison
-			// while the real files still exist. Reuses
-			// findActiveVersion directly (already built and tested
-			// for `current`) rather than duplicating its comparison
-			// logic here.
+			// Checked before deletion: HomePath/BinPath probe the
+			// filesystem, so computing them after the directory is
+			// gone would give a different, wrong answer.
 			wasActive := false
 			var activeBinPath string
 			if tool.EnvVar != "" {
 				if current, isSet := os.LookupEnv(tool.EnvVar); isSet {
 					_, wasActive = findActiveVersion(tool, []inventory.Version{v}, current)
 					if wasActive {
-						// Captured HERE, before deletion, for the exact
-						// same reason as wasActive itself: BinPath now
-						// probes the filesystem (see tooldef.Tool's own
-						// doc comment) -- computing it AFTER v.Path no
-						// longer exists would give a different, wrong
-						// answer than what was actually prepended to
-						// PATH when this version was originally
-						// activated.
 						activeBinPath = tool.BinPath(v.Path)
 					}
 				}
 			}
 
-			// The one thing this command must never get backwards --
-			// see removeVersion's own doc comment.
 			removeErr := removeVersion(v)
 			if removeErr != nil {
 				fmt.Fprintln(session.Out)
@@ -148,11 +112,9 @@ func newRemoveCmd() *cobra.Command {
 				return removeErr
 			}
 
-			// If the removed version was the currently-set default,
-			// clear that too -- otherwise `sk default <tool>` would
-			// keep pointing at something that no longer exists, and
-			// `sk use <tool> default` would later fail with a
-			// confusing "not found" error instead of a clear one.
+			// If the removed version was the stored default, clear
+			// that too, so a later `sk use <tool> default` doesn't
+			// fail with a confusing "not found" instead of a clear one.
 			clearedDefault := false
 			if stored, err := readDefault(tool); err == nil && stored == version {
 				if err := clearDefaultFile(tool); err == nil {
@@ -176,32 +138,12 @@ func newRemoveCmd() *cobra.Command {
 				))
 			}
 			if wasActive {
-				// "was the current %s — current cleared" mirrors the
-				// clearedDefault line's own shape exactly -- a real
-				// gap found via actual use: removing the DEFAULT
-				// version announced its role before describing the
-				// side effect ("was the default X -- default
-				// cleared"), but removing the ACTIVE version jumped
-				// straight to the side effect (JAVA_HOME cleared)
-				// with no equivalent role announcement at all.
 				fmt.Fprintln(session.Out, styles.Detail.Render(
 					fmt.Sprintf("  \u2514\u2500 was the current %s — current cleared", tool.DisplayName),
 				))
-				// `remove` is now eval-cooperating for exactly this
-				// one, narrow case -- see writeDeactivate's own doc
-				// comment for the full reasoning, including a real
-				// gap found via actual use: clearing the env var
-				// alone wasn't enough, since PATH still had this
-				// version's bin directory prepended too, and `sk
-				// use` never removes an EARLIER prepend when a
-				// different version is activated later in the same
-				// session -- so PATH could still resolve to some
-				// other, unexpected version even with the env var
-				// genuinely gone. wasActive is the SAME check that
-				// already powered the old, tell-the-user-to-fix-it-
-				// themselves message; this doesn't loosen that
-				// condition at all, it just adds a real, complete fix
-				// on top of it, only when it's already true.
+				// Clearing the env var alone isn't enough: PATH may
+				// still have this version's bin directory prepended,
+				// so writeDeactivate strips it too.
 				writeDeactivate(tool.EnvVar, activeBinPath, parseShellFormat(shellFormatFlag))
 				fmt.Fprintln(session.Out, styles.Detail.Render(
 					fmt.Sprintf("  \u2514\u2500 %s cleared for this shell — no %s currently active", tool.EnvVar, tool.DisplayName),
@@ -212,28 +154,18 @@ func newRemoveCmd() *cobra.Command {
 	}
 }
 
-// removalPayload is remove's OWN success `data` shape -- built on the
-// same {tool, version, vendor, action} fields design doc §2 gives
-// use/default (which keep that exact, unmodified shape -- see
-// activationPayload), plus two additive fields the frozen doc doesn't
-// cover: WasCurrent and WasDefault.
+// removalPayload is remove's --format=json success shape: the shared
+// {tool, version, vendor, action} fields plus WasCurrent, WasDefault,
+// EnvVar, and BinPath.
 //
-// A real, confirmed gap found via actual use, not a hypothetical:
-// removing the version currently active in the CALLING shell deletes
-// the real files on disk exactly like interactive `sk remove` does,
-// but --format=json is (by design -- see resolveUseJSON's own doc
-// comment on the identical limitation for `use`) a REPORT, never a
-// shell action: it can no more unset the caller's JAVA_HOME than it
-// can set it. Without these two fields, a caller had ZERO way to
-// learn that the version it just told sk to delete was the one its
-// OWN environment was still pointing at -- exactly what happened:
-// `java` broke immediately after the remove call, and a SEPARATE,
-// later `sk current java` could only report a raw, unmatched
-// JAVA_HOME value, because nothing had ever told that shell to clear
-// it. These two fields don't fix that inherent limitation -- nothing
-// can, short of the caller reacting to them by unsetting the relevant
-// env var itself -- but they make the situation visible instead of
-// silent.
+// --format=json is a report, never a shell action -- it can no more
+// unset the caller's JAVA_HOME than `use` can set it (see
+// resolveUseJSON). WasCurrent/WasDefault tell a caller whether the
+// version it just removed was the one its own shell was pointing at;
+// EnvVar/BinPath tell it exactly what to unset and strip from PATH to
+// clean up correctly:
+//
+//	if wasCurrent: unset $envVar; strip $binPath from PATH
 type removalPayload struct {
 	Tool       string  `json:"tool"`
 	Version    string  `json:"version"`
@@ -241,13 +173,13 @@ type removalPayload struct {
 	Action     string  `json:"action"`
 	WasCurrent bool    `json:"wasCurrent"`
 	WasDefault bool    `json:"wasDefault"`
+	EnvVar     string  `json:"envVar"`
+	BinPath    string  `json:"binPath"`
 }
 
-// resolveRemoveJSON is `remove`'s --format=json counterpart -- no
-// picker, no session.Out; mirrors the interactive RunE's own logic
-// (find the version, check wasCurrent/wasDefault, delete it, clear a
-// matching stored default) exactly, minus every piece of console
-// output and picker fallback.
+// resolveRemoveJSON is remove's --format=json counterpart: no picker,
+// no session.Out. Mirrors the interactive RunE (find, check
+// wasCurrent/wasDefault, delete, clear a matching stored default).
 func resolveRemoveJSON(toolName, versionArg string) (*removalPayload, *jsonError) {
 	tool, ok := tooldef.Get(toolName)
 	if !ok {
@@ -263,12 +195,8 @@ func resolveRemoveJSON(toolName, versionArg string) (*removalPayload, *jsonError
 		return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("%s%s not found", tool.FolderPrefix, versionArg)}
 	}
 
-	// Both checked BEFORE deletion, deliberately -- mirrors the
-	// interactive RunE's own wasActive check exactly, including WHY it
-	// has to happen first: HomePath's filesystem probing (see
-	// tooldef.Tool's own doc comment) needs the real files to still
-	// exist to give the right answer; computing this AFTER v.Path is
-	// gone would silently give a different, wrong result.
+	// Checked before deletion -- HomePath/BinPath need the real
+	// files to still exist.
 	wasCurrent := false
 	if tool.EnvVar != "" {
 		if current, isSet := os.LookupEnv(tool.EnvVar); isSet {
@@ -279,21 +207,16 @@ func resolveRemoveJSON(toolName, versionArg string) (*removalPayload, *jsonError
 	if stored, err := readDefault(tool); err == nil && stored == v.Number {
 		wasDefault = true
 	}
+	binPath := tool.BinPath(v.Path)
 
-	// The target was genuinely resolved -- a failure from here on is
-	// activation_failed (design doc: "resolved version, but activation
-	// itself failed"), generalized here to "the state-changing
-	// operation on the resolved target failed", not internal_error.
+	// The target was genuinely resolved, so a failure from here is
+	// activation_failed, not internal_error.
 	if err := removeVersion(v); err != nil {
 		return nil, &jsonError{Code: ErrCodeActivationFailed, Message: fmt.Sprintf("could not remove %s%s: %s", tool.FolderPrefix, v.Number, err)}
 	}
 
-	// Best-effort, exactly like the interactive path: a failure here
-	// doesn't undo the deletion that already succeeded, and isn't
-	// itself reported as this call's own error -- matching
-	// clearedDefault's own "clearedDefault := false" swallow-and-move-on
-	// pattern in the interactive RunE above. wasDefault is already
-	// known from the check above, so this only needs to ACT on it now.
+	// Best-effort, like the interactive path: a failure here doesn't
+	// undo the deletion or become this call's own error.
 	if wasDefault {
 		_ = clearDefaultFile(tool)
 	}
@@ -305,5 +228,7 @@ func resolveRemoveJSON(toolName, versionArg string) (*removalPayload, *jsonError
 		Action:     string(actionRemoved),
 		WasCurrent: wasCurrent,
 		WasDefault: wasDefault,
+		EnvVar:     tool.EnvVar,
+		BinPath:    binPath,
 	}, nil
 }

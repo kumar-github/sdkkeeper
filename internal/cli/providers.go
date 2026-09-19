@@ -11,50 +11,23 @@ import (
 	"sdkkeeper/internal/tooldef"
 )
 
-// namedProvider pairs a Provider with the vendor name it's registered
-// under. A slice of these, not a map, is what preserves each tool's
-// vendor list in a DELIBERATE order rather than an incidental one --
-// Temurin is listed before Liberica here because it's this project's
-// own established "mainstream default" JDK vendor (a real distinction
-// from early in this project, not a coincidence of alphabetical
-// sorting), and that ordering matters for which vendor a user sees
-// first in the picker and in `vendors`/`search` output. A caught
-// regression during a refactor: an earlier version of this file used
-// sort.Strings() on a map's keys, which silently reordered this to
-// "liberica, temurin" (alphabetical) -- technically stable and
-// deterministic, but wrong, since it lost a genuinely meaningful
-// choice for an accidental one. Fixed by switching to this
-// slice-based structure, which has no unordered map step to
-// accidentally re-sort away.
+// namedProvider pairs a Provider with its registered vendor name. A
+// slice, not a map, preserves each tool's vendor order deliberately
+// (Temurin before Liberica, this project's mainstream-default JDK
+// vendor) rather than an incidental one -- a map's sort.Strings()
+// would silently alphabetize this to "liberica, temurin".
 type namedProvider struct {
 	name     string
 	provider registry.Provider
 }
 
-// providersByTool maps each tool name to its own ordered set of
-// vendor Providers.
-//
-// A tool with NO entry here (or an empty slice) has no install
-// support yet -- `install` and `vendors` both check this generically,
-// rather than a hardcoded "is this java?" check, so a new tool
-// automatically gets correct "not yet supported" behavior the moment
-// before its own entry is added, and correct real behavior the moment
-// after.
-//
-// A tool with EXACTLY ONE provider -- true of every non-JDK tool
-// currently registered in tooldef (maven, gradle, node, kafka each
-// have exactly one canonical upstream source, not competing vendors,
-// confirmed directly by their own FolderPrefix values already baking
-// in that one vendor, e.g. "apache-maven-") -- never shows a vendor
-// picker and never gets a vendor suffix on its version identifiers:
-// with only one possible source, there's no real choice to present
-// and no ambiguity a suffix would need to resolve. This distinction
-// is load-bearing throughout install.go, not just cosmetic -- see
-// hasSingleVendor's callers.
-//
-// Adding a new tool's install support means adding one entry here --
-// no changes needed to install.go, search.go, vendors.go, or doctor.go,
-// which all read this generically.
+// providersByTool maps each tool name to its ordered set of vendor
+// Providers. A tool with no entry (or an empty slice) has no install
+// support yet -- checked generically by install/vendors, not a
+// hardcoded per-tool check. A tool with exactly one provider (every
+// non-JDK tool currently registered) never shows a vendor picker or
+// gets a vendor suffix -- see hasSingleVendor's callers. Adding a new
+// tool's install support means adding one entry here.
 var providersByTool = map[string][]namedProvider{
 	"java": {
 		{"temurin", &temurin.Provider{}},
@@ -68,12 +41,9 @@ var providersByTool = map[string][]namedProvider{
 	},
 }
 
-// providersFor returns the known vendor Providers for a tool, keyed
-// by vendor name -- empty (possibly nil) if that tool has no install
-// support yet. Callers that need the deliberate ORDER (pickers,
-// display output) should use vendorNamesFor instead and look up each
-// name here; this form is for direct "do I have a provider named X"
-// lookups, e.g. parsing a user-typed vendor suffix.
+// providersFor returns a tool's vendor Providers keyed by name (nil
+// if unsupported). For deliberate ORDER, use vendorNamesFor instead;
+// this form is for direct "do I have a provider named X" lookups.
 func providersFor(toolName string) map[string]registry.Provider {
 	ordered := providersByTool[toolName]
 	if len(ordered) == 0 {
@@ -87,10 +57,7 @@ func providersFor(toolName string) map[string]registry.Provider {
 }
 
 // vendorNamesFor returns a tool's vendor names in the deliberate
-// order they're registered in providersByTool -- NOT alphabetical,
-// and not a map's incidental iteration order either. See
-// providersByTool's own comment for why this distinction is real, not
-// cosmetic.
+// order registered in providersByTool -- not alphabetical.
 func vendorNamesFor(toolName string) []string {
 	ordered := providersByTool[toolName]
 	names := make([]string, len(ordered))
@@ -107,14 +74,9 @@ func hasSingleVendor(toolName string) bool {
 	return len(vendorNamesFor(toolName)) == 1
 }
 
-// installSupportedTools returns the display names of every tool that
-// currently has at least one registered provider. Alphabetical here
-// is fine (unlike vendor order within one tool, no tool has an
-// established "should appear first" precedent the way Temurin does
-// among JDK vendors) -- used to build an accurate "currently
-// supported: X, Y" message that stays correct automatically as more
-// tools gain install support, rather than a hardcoded string that
-// would silently go stale the moment a second tool is added.
+// installSupportedTools returns the display names of every tool with
+// at least one registered provider, alphabetically (no ordering
+// precedent applies across tools the way it does among JDK vendors).
 func installSupportedTools() []string {
 	names := make([]string, 0, len(providersByTool))
 	for name := range providersByTool {

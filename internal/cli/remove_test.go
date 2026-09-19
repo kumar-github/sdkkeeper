@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"sdkkeeper/internal/inventory"
@@ -189,6 +191,12 @@ func TestResolveRemoveJSON_ReportsWasCurrentAndWasDefault(t *testing.T) {
 	if !data.WasDefault {
 		t.Error("expected WasDefault=true -- this version was the stored default")
 	}
+	if data.EnvVar != "JAVA_HOME" {
+		t.Errorf("expected envVar=JAVA_HOME so a caller knows exactly what to unset, got %q", data.EnvVar)
+	}
+	if want := tool.BinPath(dir); data.BinPath != want {
+		t.Errorf("expected binPath=%q (the exact PATH entry a caller would need to strip), got %q", want, data.BinPath)
+	}
 }
 
 // TestResolveRemoveJSON_ReportsFalseWhenNeitherCurrentNorDefault
@@ -213,5 +221,53 @@ func TestResolveRemoveJSON_ReportsFalseWhenNeitherCurrentNorDefault(t *testing.T
 	}
 	if data.WasDefault {
 		t.Error("expected WasDefault=false -- no default was ever set")
+	}
+	// EnvVar/BinPath are reported UNCONDITIONALLY -- same "always
+	// present, caller decides whether to act on it" pattern as
+	// Vendor -- not only when WasCurrent happens to be true.
+	if data.EnvVar != "JAVA_HOME" {
+		t.Errorf("expected envVar to still be reported even when WasCurrent is false, got %q", data.EnvVar)
+	}
+	removedDir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-temurin")
+	if want := tool.BinPath(removedDir); data.BinPath != want {
+		t.Errorf("expected binPath=%q for the version actually removed, got %q", want, data.BinPath)
+	}
+}
+
+// TestRemove_NoVersionWithoutTTYReturnsVersionRequired is remove's own
+// counterpart to resolve_test.go's identical test for `use` -- design
+// doc §6's "harden the existing automatic TTY-detection fallback".
+// Invokes the actual cobra command (via withSession, which sets the
+// package-level session to a zero-HasTTY Session, exactly like every
+// other test in this package that never opens a real terminal) rather
+// than a standalone function, since remove's no-version/picker logic
+// lives directly in its RunE closure, unlike use's (which delegates
+// to the separately-testable resolveUse).
+func TestRemove_NoVersionWithoutTTYReturnsVersionRequired(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+
+	var runErr error
+	out := withSession(t, func() {
+		cmd := newRemoveCmd()
+		runErr = cmd.RunE(cmd, []string{"java"})
+	})
+
+	var cliErr *CLIError
+	if !errors.As(runErr, &cliErr) {
+		t.Fatalf("expected a *CLIError, got: %T (%v)", runErr, runErr)
+	}
+	if cliErr.Code != ErrCodeVersionRequired {
+		t.Errorf("expected version_required, got %q", cliErr.Code)
+	}
+	if ExitCode(runErr) != 101 {
+		t.Errorf("expected exit code 101, got %d", ExitCode(runErr))
+	}
+	if strings.Contains(out, "/dev/tty") {
+		t.Errorf("expected the picker's own low-level wording to NEVER reach the user, got: %q", out)
+	}
+	if !strings.Contains(out, "a version is required") {
+		t.Errorf("expected a clear, actionable message, got: %q", out)
 	}
 }

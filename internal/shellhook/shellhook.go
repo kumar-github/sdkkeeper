@@ -1,14 +1,13 @@
 // Package shellhook generates the shell integration `sk init <shell>`
-// prints. This IS the actual distribution mechanism described in design
-// doc §5: a compiled binary cannot change its parent shell's
-// environment, so the wrapper function this package emits is what
-// actually applies `use`'s result to a live shell session, via
-// `eval "$(sk init zsh)"` (or the Nushell equivalent) in the user's
-// shell config.
+// prints -- the actual distribution mechanism, since a compiled
+// binary can't change its parent shell's environment on its own. The
+// wrapper function this package emits applies `use`'s result to a
+// live shell session, via `eval "$(sk init zsh)"` (or the Nushell
+// equivalent) in the user's shell config.
 //
-// Both templates use `command sk` / `^sk` specifically to bypass the
-// wrapper function itself and reach the real installed binary on PATH
-// -- without this, the wrapper would recurse into itself.
+// Both templates use `command sk` / `^sk` to bypass the wrapper
+// function itself and reach the real installed binary on PATH --
+// without this, the wrapper would recurse into itself.
 package shellhook
 
 import (
@@ -20,12 +19,9 @@ import (
 var templates embed.FS
 
 // Get returns the shell integration script for the given shell name
-// ("zsh", "nu", "powershell", or "pwsh" -- an alias for "powershell",
-// matching PowerShell 7+'s own binary name being literally "pwsh").
-// Returns an error for anything else, rather than a silent empty
-// result -- design doc §11.1 identified "shell hook not installed,
-// silently" as a real onboarding failure mode; failing loudly here on
-// an unsupported shell name follows the same reasoning.
+// ("zsh", "nu", "powershell", or "pwsh", an alias matching PowerShell
+// 7+'s own binary name). Returns an error for anything else, rather
+// than a silent empty result.
 func Get(shell string) (string, error) {
 	var filename string
 	switch shell {

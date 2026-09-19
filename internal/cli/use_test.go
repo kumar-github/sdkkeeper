@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"sdkkeeper/internal/term"
 	"sdkkeeper/internal/tooldef"
 )
 
@@ -64,6 +66,69 @@ func TestResolveUseJSON_RealInstalledVersionActivates(t *testing.T) {
 	}
 	if data.Action != string(actionActivated) {
 		t.Errorf("expected action=activated, got %q", data.Action)
+	}
+	if data.EnvVar != "JAVA_HOME" {
+		t.Errorf("expected envVar=JAVA_HOME, got %q", data.EnvVar)
+	}
+	tool, _ := tooldef.Get("java")
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-temurin")
+	if want := tool.HomePath(dir); data.EnvValue != want {
+		t.Errorf("expected envValue=%q, got %q", want, data.EnvValue)
+	}
+	if want := tool.BinPath(dir); data.BinPath != want {
+		t.Errorf("expected binPath=%q, got %q", want, data.BinPath)
+	}
+}
+
+// TestResolveUseJSON_MatchesInteractiveResultExactly is the strongest
+// guarantee usePayload's own EnvVar/EnvValue/BinPath fields can have:
+// calling BOTH resolveUseJSON and the interactive resolveUse for the
+// EXACT same installed version and confirming they report identical
+// env var name/value and bin path -- not just "looks plausible", but
+// genuinely, mechanically the same values the interactive shell
+// wrapper's own eval would have used. If resolve.go's own
+// Result-building logic (env var name, tool.HomePath, tool.BinPath)
+// ever changes, this test breaks immediately if resolveUseJSON wasn't
+// updated to match -- exactly the kind of cross-command consistency
+// design doc §10 asks for, applied here to a pair that isn't two
+// separate commands but the two separate CODE PATHS behind `use`
+// itself.
+func TestResolveUseJSON_MatchesInteractiveResultExactly(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "17.0.9-liberica")
+
+	jsonData, jerr := resolveUseJSON("java", "17.0.9-liberica")
+	if jerr != nil {
+		t.Fatalf("resolveUseJSON failed: %+v", jerr)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	sess := &term.Session{Out: w}
+	result, resolveErr := resolveUse(sess, term.Styles{}, "java", "17.0.9-liberica", "")
+	w.Close()
+	var discard bytes.Buffer
+	discard.ReadFrom(r)
+	if resolveErr != nil {
+		t.Fatalf("resolveUse failed: %v", resolveErr)
+	}
+
+	interactiveValue, ok := result.EnvVars[jsonData.EnvVar]
+	if !ok {
+		t.Fatalf("interactive Result has no entry for %q at all: %+v", jsonData.EnvVar, result.EnvVars)
+	}
+	if interactiveValue != jsonData.EnvValue {
+		t.Errorf("envValue mismatch: JSON says %q, interactive Result says %q", jsonData.EnvValue, interactiveValue)
+	}
+
+	if len(result.PathPrepends) != 1 {
+		t.Fatalf("expected exactly one PathPrepend from the interactive path, got %d: %+v", len(result.PathPrepends), result.PathPrepends)
+	}
+	if result.PathPrepends[0].Dir != jsonData.BinPath {
+		t.Errorf("binPath mismatch: JSON says %q, interactive Result says %q", jsonData.BinPath, result.PathPrepends[0].Dir)
 	}
 }
 

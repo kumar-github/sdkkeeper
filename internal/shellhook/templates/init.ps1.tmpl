@@ -1,17 +1,9 @@
 function sk {
-    # --format=json is checked FIRST, anywhere in $args -- not just at
-    # $args[0] -- and, if present, always takes the plain passthrough
-    # branch below, regardless of whether $args[0] is "use"/"remove".
-    # A real, found gap, confirmed directly against a real pwsh
-    # process: this dispatch used to key off $args[0] alone, so
-    # `sk use --format=json java 21...` (flag AFTER the subcommand)
-    # reached Invoke-Expression with sk's own raw JSON object as its
-    # input -- confirmed to fail outright with a real PowerShell parse
-    # error ("Unexpected token ... in expression or statement").
-    # --format=json is fundamentally a report, never a shell action
-    # (design doc §6/§8: the two are kept permanently independent), so
-    # it must never reach Invoke-Expression, no matter where in $args
-    # it appears or what value follows it.
+    # --format=json is checked anywhere in $args, not just $args[0],
+    # and always takes the plain passthrough branch below -- it must
+    # never reach Invoke-Expression, since it's a report, not a shell
+    # action, and `sk use --format=json ...` (flag after the
+    # subcommand) would otherwise Invoke-Expression sk's raw JSON.
     $hasFormat = $false
     foreach ($a in $args) {
         if ($a -eq "--format" -or $a -like "--format=*") {
@@ -20,21 +12,13 @@ function sk {
         }
     }
     if (-not $hasFormat -and $args.Count -ge 1 -and ($args[0] -eq "use" -or $args[0] -eq "remove")) {
-        # sk.exe, WITH the extension, deliberately -- the same bypass
-        # technique zsh's own template uses (`command sk`) and
-        # Nushell's uses (`^sk`), just PowerShell's own mechanism for
-        # it: a function named exactly "sk" does NOT match "sk.exe",
-        # so this reaches the real, installed binary on PATH rather
-        # than recursing into this very function.
+        # sk.exe, with the extension, bypasses this function (named
+        # "sk") to reach the real binary on PATH.
         $output = & sk.exe @args --shell-format=powershell
         if ($output) {
-            # Joined into ONE string, not invoked line-by-line -- the
-            # direct structural counterpart to zsh's own `eval
-            # "$(command sk "$@")"`: sk's own PowerShell-format output
-            # can itself span multiple lines (e.g. the PATH-
-            # deduplication block), and Invoke-Expression, like zsh's
-            # eval, correctly executes a full, multi-line script block
-            # as one unit when given the whole thing at once.
+            # Joined into one string so a multi-line PowerShell-format
+            # output (e.g. the PATH-deduplication block) executes as
+            # one unit, the same as zsh's own eval "$(...)".
             Invoke-Expression ($output -join "`n")
         }
     } else {

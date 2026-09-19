@@ -1,34 +1,14 @@
-// Package gradle implements registry.Provider for Gradle's own,
-// single official distribution.
+// Package gradle implements registry.Provider for Gradle's single
+// official distribution.
 //
-// Confirmed directly by fetching Gradle's own real, live API during
-// design research -- genuinely the best-structured of the three
-// providers built so far in this project:
-//
-//   - A real, dedicated JSON API exists (services.gradle.org/versions/),
-//     unlike Maven (no API at all, just a static file archive) and
-//     more directly comparable to Temurin/Liberica's own APIs.
-//
-//   - The checksum is embedded DIRECTLY in the same response as the
-//     download URL -- no separate request needed at all (unlike
-//     Maven, which needs a second fetch for its .sha512 file). SHA-256,
-//     confirmed by the 64-hex-character checksum values and the
-//     ".sha256" checksumUrl suffix.
-//
-//   - Gradle's own API provides an explicit, authoritative "final"
-//     boolean directly -- true only for genuine, stable releases,
-//     false for every RC/milestone/snapshot/nightly build. This is a
-//     real, reliable filter straight from the source, not a string-
-//     pattern heuristic (contrast with Maven, which has no such field
-//     and needed a keyword-based guess instead).
-//
-//   - Like Maven, Gradle publishes exactly ONE universal,
-//     cross-platform archive per version (pure Java plus a thin
-//     launcher script) -- osName/arch are accepted here only to
-//     satisfy the shared interface; they are genuinely ignored.
-//
-//   - No LTS concept exists for Gradle either -- one continuous
-//     release line, not separate support tracks.
+// A real, dedicated JSON API exists (services.gradle.org/versions/),
+// unlike Maven's static file archive. The checksum (SHA-256) is
+// embedded directly in the same response as the download URL, no
+// second request needed. The API provides an authoritative "final"
+// boolean, true only for stable releases -- no string-pattern
+// guessing needed, unlike Maven. Like Maven, Gradle publishes one
+// universal, cross-platform archive per version, so osName/arch are
+// accepted only to satisfy the shared interface. No LTS concept.
 package gradle
 
 import (
@@ -44,9 +24,8 @@ import (
 	"sdkkeeper/internal/registry"
 )
 
-// DefaultBaseURL is Gradle's own real distribution/version service.
-// Overridable for testing against a local httptest.Server, matching
-// every other provider in this codebase.
+// DefaultBaseURL is Gradle's distribution/version service.
+// Overridable for testing against a local httptest.Server.
 const DefaultBaseURL = "https://services.gradle.org"
 
 // Provider implements registry.Provider for Gradle.
@@ -71,10 +50,9 @@ func (p *Provider) client() *http.Client {
 	return http.DefaultClient
 }
 
-// release mirrors the real, confirmed JSON shape of one entry in
-// services.gradle.org/versions/all -- field names taken directly from
-// a real, live fetch of that exact endpoint during design research,
-// restricted to the fields actually needed here.
+// release mirrors the JSON shape of one entry in
+// services.gradle.org/versions/all, restricted to the fields needed
+// here.
 type release struct {
 	Version     string `json:"version"`
 	DownloadURL string `json:"downloadUrl"`
@@ -82,14 +60,11 @@ type release struct {
 	Final       bool   `json:"final"`
 }
 
-// fetchAllVersions fetches and parses Gradle's own real version-list
-// endpoint -- the single shared fetch behind ListMajorVersions,
-// ListMajorVersionsWithLTS, ListPatchVersions, and ResolveAsset,
-// matching the same shared-fetch pattern already established in every
-// other provider in this codebase. Filters to Final == true directly
-// -- Gradle's own API already distinguishes genuine stable releases
-// from RC/milestone/snapshot/nightly builds, so no string-pattern
-// guessing is needed here the way Maven's own provider needed.
+// fetchAllVersions fetches and parses Gradle's version-list endpoint
+// -- the single shared fetch behind ListMajorVersions,
+// ListMajorVersionsWithLTS, ListPatchVersions, and ResolveAsset.
+// Filters to Final == true directly, since Gradle's API already
+// distinguishes stable releases from RC/milestone/nightly builds.
 func (p *Provider) fetchAllVersions(ctx context.Context) ([]release, error) {
 	url := p.baseURL() + "/versions/all"
 
@@ -145,10 +120,9 @@ func (p *Provider) ListMajorVersions(ctx context.Context) ([]string, error) {
 	return versions, nil
 }
 
-// ListMajorVersionsWithLTS implements registry.Provider. Gradle has no
-// LTS release concept at all (one continuous release line, not
-// separate support tracks), so LTS is always false here; the field
-// still exists to satisfy the shared interface.
+// ListMajorVersionsWithLTS implements registry.Provider. Gradle has
+// no LTS concept, so LTS is always false; the field exists only to
+// satisfy the shared interface.
 func (p *Provider) ListMajorVersionsWithLTS(ctx context.Context) ([]registry.MajorVersionInfo, error) {
 	releases, err := p.fetchAllVersions(ctx)
 	if err != nil {
@@ -180,9 +154,7 @@ func (p *Provider) ListMajorVersionsWithLTS(ctx context.Context) ([]registry.Maj
 }
 
 // ListPatchVersions implements registry.Provider. osName/arch are
-// accepted only to satisfy the shared interface -- see the package
-// doc for why they're genuinely irrelevant to Gradle's single,
-// universal archive.
+// accepted only to satisfy the shared interface -- see the package doc.
 func (p *Provider) ListPatchVersions(ctx context.Context, major, osName, arch string) ([]string, error) {
 	releases, err := p.fetchAllVersions(ctx)
 	if err != nil {
@@ -198,15 +170,10 @@ func (p *Provider) ListPatchVersions(ctx context.Context, major, osName, arch st
 	if len(patches) == 0 {
 		return nil, registry.ErrVersionNotFound
 	}
-	// See registry.DedupeStrings' own doc comment for why this is
-	// applied uniformly across every provider's ListPatchVersions,
-	// not just the one it was first reported against.
 	patches = registry.DedupeStrings(patches)
 
-	// Newest-first, matching the convention every other version list
-	// in this tool already uses. Compares numeric dot-components
-	// rather than raw strings -- plain string comparison would sort
-	// "8.10" before "8.9" incorrectly (lexicographic, not numeric).
+	// Newest-first; compares numeric dot-components since plain
+	// string comparison sorts "8.10" before "8.9" incorrectly.
 	sort.Slice(patches, func(i, j int) bool {
 		return compareVersions(patches[i], patches[j]) > 0
 	})
@@ -214,9 +181,7 @@ func (p *Provider) ListPatchVersions(ctx context.Context, major, osName, arch st
 }
 
 // compareVersions compares two dot-separated numeric version strings
-// component by component (e.g. "8.10" > "8.9", which plain string
-// comparison would get backwards). Returns >0 if a > b, <0 if a < b,
-// 0 if equal. Non-numeric components compare as 0.
+// component by component. Returns >0/<0/0 for a>b/a<b/a==b.
 func compareVersions(a, b string) int {
 	aParts := strings.Split(a, ".")
 	bParts := strings.Split(b, ".")
@@ -236,8 +201,7 @@ func compareVersions(a, b string) int {
 }
 
 // ResolveAsset implements registry.Provider. osName/arch are accepted
-// only to satisfy the shared interface -- see the package doc for why
-// they're genuinely irrelevant to Gradle's single, universal archive.
+// only to satisfy the shared interface -- see the package doc.
 func (p *Provider) ResolveAsset(ctx context.Context, version, osName, arch string) (registry.Asset, error) {
 	releases, err := p.fetchAllVersions(ctx)
 	if err != nil {
@@ -251,9 +215,8 @@ func (p *Provider) ResolveAsset(ctx context.Context, version, osName, arch strin
 		if r.DownloadURL == "" || r.Checksum == "" {
 			continue
 		}
-		// downloadUrl's own filename (e.g. "gradle-8.14.5-bin.zip") is
-		// used directly, rather than reconstructed -- avoids
-		// duplicating Gradle's own naming convention here.
+		// The URL's own filename is used directly, rather than
+		// reconstructed, to avoid duplicating Gradle's naming convention.
 		filename := r.DownloadURL
 		if i := strings.LastIndexByte(filename, '/'); i != -1 {
 			filename = filename[i+1:]

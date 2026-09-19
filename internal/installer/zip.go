@@ -10,27 +10,14 @@ import (
 	"time"
 )
 
-// extractZip extracts a .zip archive into destDir -- the archive
-// format both Temurin and Liberica publish their Windows JDK builds
-// as (confirmed during this project's earlier live-API research into
-// both vendors), as opposed to the .tar.gz format used on
-// darwin/linux. Mirrors extractTarGz's exact signature, progress
-// callback contract, and Zip-Slip path-traversal guard -- deliberately
-// kept as close to a line-for-line structural match as the two
-// archive formats' real API differences allow, so a future reader
-// already familiar with one immediately understands the other.
-//
-// Real, confirmed difference from extractTarGz's implementation:
-// archive/zip's Reader gives the full entry list up front (r.File, a
-// slice), unlike archive/tar's Reader, which is a genuinely streaming,
-// one-entry-at-a-time API (tr.Next()) -- zip's own central directory
-// format is DESIGNED to be read as a complete index first (that's
-// what makes random access into a zip possible at all, unlike tar's
-// sequential-only format). This means the loop below ranges over a
-// known-length slice rather than looping until io.EOF, but the
-// externally-observable progress-callback CONTRACT (throttled during,
-// always exactly one final=true call reflecting the true total) is
-// preserved exactly.
+// extractZip extracts a .zip archive into destDir -- the format both
+// Temurin and Liberica publish their Windows JDK builds as, vs.
+// .tar.gz on darwin/linux. Mirrors extractTarGz's signature, progress
+// contract, and Zip-Slip guard. archive/zip's Reader gives the full
+// entry list up front (r.File), unlike tar's streaming, one-entry-
+// at-a-time API, so this loop ranges over a known-length slice rather
+// than looping until io.EOF, but the progress-callback contract
+// (throttled during, one final=true call) is preserved exactly.
 func extractZip(archivePath, destDir string, onProgress func(count int64, final bool)) error {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
@@ -52,11 +39,9 @@ func extractZip(archivePath, destDir string, onProgress func(count int64, final 
 		}
 	}
 
-	// An empty archive (zero entries) never enters the loop above, so
-	// onProgress would otherwise never receive its guaranteed final
-	// call at all -- matching extractTarGz's own behavior, which DOES
-	// still call onProgress(0, true) when tr.Next() hits io.EOF
-	// immediately on an empty archive.
+	// An empty archive never enters the loop above, so this ensures
+	// onProgress still gets its guaranteed final call, matching
+	// extractTarGz's behavior for an empty archive.
 	if len(r.File) == 0 && onProgress != nil {
 		onProgress(0, true)
 	}
@@ -65,10 +50,8 @@ func extractZip(archivePath, destDir string, onProgress func(count int64, final 
 }
 
 // extractZipEntry writes one entry (file, directory, or symlink) to
-// its resolved location under destDir. Split out from extractZip's
-// own loop so the Zip-Slip guard and per-entry-type handling can be
-// tested and reasoned about independently of the progress-throttling
-// logic wrapped around it.
+// its resolved location under destDir, independent of the progress-
+// throttling logic wrapped around it in extractZip.
 func extractZipEntry(entry *zip.File, destDir string) error {
 	target := filepath.Join(destDir, entry.Name)
 	if !strings.HasPrefix(filepath.Clean(target)+string(os.PathSeparator), filepath.Clean(destDir)+string(os.PathSeparator)) {
@@ -77,21 +60,13 @@ func extractZipEntry(entry *zip.File, destDir string) error {
 
 	mode := entry.Mode()
 
-	// See extractTarGz's own comment on POSIX permission bits being a
-	// harmless no-op on Windows (NTFS uses ACLs instead) -- the same
-	// mode.Perm()/0o755 calls below have identical, already-handled
-	// behavior there, so that reasoning isn't repeated a second time
-	// here.
+	// POSIX permission bits are a harmless no-op on Windows (NTFS
+	// uses ACLs instead) -- see extractTarGz.
 	switch {
 	case mode&os.ModeSymlink != 0:
-		// A zip entry can carry a symlink, but only via Unix-specific
-		// external file attributes some zip writers set (confirmed
-		// via Go's own archive/zip source: FileInfo().Mode() decodes
-		// this from the same field real `zip` CLI implementations on
-		// Unix populate) -- genuinely rare for a Windows-targeted JDK
-		// archive specifically, but handled for correctness rather
-		// than assumed away, the same defense-in-depth spirit as the
-		// path-traversal guard above.
+		// A zip entry can carry a symlink via Unix-specific external
+		// file attributes some zip writers set -- rare for a
+		// Windows-targeted archive, but handled for correctness.
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
@@ -136,46 +111,16 @@ func extractZipEntry(entry *zip.File, destDir string) error {
 	return nil
 }
 
-// dirPerm and filePerm fall back to sensible, standard Unix defaults
-// (0o755 for directories, 0o644 for files) whenever a zip entry's own
-// decoded mode is missing bits the OWNER genuinely needs to use the
-// extracted entry at all.
-//
-// A real, live-reported bug this fixes, confirmed and precisely
-// diagnosed by directly inspecting Go's own archive/zip output (not
-// assumed): entries created via the plain Writer.Create convenience
-// method (as opposed to CreateHeader+SetMode) decode back as mode
-// 0o666 (rw-rw-rw-) -- readable and writable, but with NO execute bit
-// for anyone at all, confirmed directly by printing FileHeader.Mode()
-// for a real, in-memory test archive. For a FILE, 0o666 is a
-// perfectly usable (if permissive) mode. For a DIRECTORY, missing the
-// owner's execute bit makes it completely un-enterable, by anyone,
-// including its own owner -- Unix requires the execute bit
-// specifically to traverse INTO a directory, independent of the read
-// bit. This is exactly why creating "bin" inside an already-extracted
-// parent directory failed with "permission denied": the PARENT
-// itself had been created with this same 0o666 mode, making it
-// impossible to create anything inside it at all.
-//
-// The original version of this fix checked for mode.Perm() == 0
-// specifically -- diagnosed from reasoning about Go's source alone,
-// without actually running it. That check never fires for the REAL,
-// empirically-confirmed 0o666 value, so it silently failed to fix
-// anything -- caught immediately by
-// TestExtractZip_ZeroModeEntriesFallBackToSensibleDefaults actually
-// asserting on the resulting mode bits, rather than merely on
-// whether extraction returned an error.
-//
-// dirPerm specifically requires ALL of owner-read+write+execute
-// (0o700) to be present before trusting the archive's own mode;
-// filePerm only requires the entry to carry ANY permission bits at
-// all (files don't need an execute bit to be usable, so 0o666 is
-// left alone, unlike for directories). Genuine vendor archives built
-// by real zip tools are expected to set these correctly -- this
-// fallback is defense-in-depth for archives that don't (confirmed:
-// specifically a gap in Go's OWN bare Create() convenience method,
-// not a general zip-format limitation), not an assumption that real
-// vendor archives need it.
+// dirPerm and filePerm fall back to sensible Unix defaults (0o755 for
+// directories, 0o644 for files) when a zip entry's decoded mode is
+// missing bits the owner needs to use it. Entries created via Go's
+// plain Writer.Create decode back as mode 0o666 (rw-rw-rw-, no
+// execute bit) -- fine for a file, but a directory missing the
+// owner's execute bit is completely un-enterable, which is why
+// creating "bin" inside an extracted parent could fail with
+// "permission denied". dirPerm requires all of owner-rwx (0o700)
+// before trusting the archive's mode; filePerm only requires any
+// permission bits at all, since files don't need an execute bit.
 func dirPerm(mode os.FileMode) os.FileMode {
 	if mode.Perm()&0o700 == 0o700 {
 		return mode.Perm()
@@ -190,11 +135,9 @@ func filePerm(mode os.FileMode) os.FileMode {
 	return 0o644
 }
 
-// readZipSymlinkTarget reads a symlink entry's target path -- for a
-// symlink, archive/zip stores the target STRING as the entry's own
-// "file content" (confirmed via Go's own archive/zip documentation
-// and the same convention Info-ZIP and Unix `zip`/`unzip` use),
-// rather than as file metadata the way tar.Header.Linkname is.
+// readZipSymlinkTarget reads a symlink entry's target path --
+// archive/zip stores it as the entry's own file content, unlike
+// tar.Header.Linkname's metadata field.
 func readZipSymlinkTarget(entry *zip.File) (string, error) {
 	src, err := entry.Open()
 	if err != nil {

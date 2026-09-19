@@ -1,34 +1,19 @@
 // Package liberica implements registry.Provider against BellSoft's
 // Product Discovery API (api.bell-sw.com), which serves Liberica JDK
-// builds -- the second vendor added to this tool, alongside Temurin.
+// builds -- the second vendor added alongside Temurin.
 //
-// Real, confirmed differences from Temurin/Adoptium (verified directly
-// against BellSoft's own published API documentation, not assumed):
-//   - OS naming differs: "macos", not "mac" (confirmed via BellSoft's
-//     own /v1/liberica/operating-systems discovery endpoint).
-//   - Architecture is a genuinely different, two-axis system: Temurin
-//     uses one string ("x64", "aarch64"); Liberica uses an arch FAMILY
-//     ("x86", "arm", confirmed via /v1/liberica/architectures) plus a
-//     SEPARATE bitness field (32/64) to distinguish width.
+// Differences from Temurin/Adoptium:
+//   - OS naming differs: "macos", not "mac".
+//   - Architecture is a two-axis system: Temurin uses one string
+//     ("x64", "aarch64"); Liberica uses an arch family ("x86", "arm")
+//     plus a separate bitness field (32/64).
 //   - The response is a flat JSON array, not nested release+binaries
 //     objects like Adoptium's.
-//   - The checksum is SHA-1, not SHA-256 -- every documented response
-//     example includes a "sha1" field, none include "sha256". This is
-//     why registry.Asset/installer.Options were generalized to support
-//     more than one checksum algorithm.
+//   - The checksum is SHA-1, not SHA-256.
 //
-// Unlike Temurin, BellSoft's documentation does not show a dedicated
-// "list all major versions" endpoint (Adoptium has
-// /v3/info/available_releases; no Liberica equivalent was found) --
-// ListMajorVersions here is a best-effort derivation from a broad
-// releases query. A real bug was found and fixed in this derivation
-// after a live report (only one major version, the current newest,
-// ever appeared in the picker) -- see ListMajorVersionsWithLTS's own
-// comment for the confirmed root cause. This sandbox's network
-// allowlist still doesn't reach api.bell-sw.com directly, so that fix
-// itself still needs a real, live confirmation once deployed, the
-// same way Temurin's own real bugs were eventually confirmed with
-// live testing.
+// Unlike Temurin, BellSoft has no dedicated "list all major versions"
+// endpoint -- ListMajorVersions is a best-effort derivation from a
+// broad releases query; see ListMajorVersionsWithLTS.
 package liberica
 
 import (
@@ -235,14 +220,9 @@ func (p *Provider) ListPatchVersions(ctx context.Context, major, goos, goarch st
 }
 
 // compareVersions compares two dot-separated version strings
-// numerically, component by component (e.g. "25.0.4.1" > "25.0.4" >
-// "25.0.1" > "25") -- a missing trailing component compares as 0, so
-// versions with different numbers of components still compare
-// correctly. Plain string comparison would sort incorrectly here
-// (e.g. "25.0.10" before "25.0.9" lexicographically); this compares
-// the actual numeric value of each component instead. Mirrors the
-// identical, already-established pattern in apache's and gradle's own
-// compareVersions.
+// numerically, component by component -- a missing trailing component
+// compares as 0. Plain string comparison would sort "25.0.10" before
+// "25.0.9" incorrectly.
 func compareVersions(a, b string) int {
 	aParts := strings.Split(a, ".")
 	bParts := strings.Split(b, ".")
@@ -263,15 +243,10 @@ func compareVersions(a, b string) int {
 
 // ListMajorVersions implements registry.Provider.
 //
-// Best-effort: no dedicated "list majors" endpoint was found in
-// BellSoft's published documentation (unlike Adoptium's
-// /v3/info/available_releases). Queries broadly (version-modifier=
-// latest, LTS releases, a fixed platform just to get a
-// representative response -- the actual SET of majors offered is not
-// expected to vary by platform, even though specific patches within a
-// major might) and derives the unique set of featureVersion values
-// from whatever comes back. NEEDS LIVE VERIFICATION -- this sandbox's
-// network allowlist doesn't reach api.bell-sw.com.
+// Best-effort: no dedicated "list majors" endpoint exists, so this
+// queries broadly (a fixed platform just to get a representative
+// response -- the set of majors offered isn't expected to vary by
+// platform) and derives the unique set of featureVersion values.
 func (p *Provider) ListMajorVersions(ctx context.Context) ([]string, error) {
 	infos, err := p.ListMajorVersionsWithLTS(ctx)
 	if err != nil {
@@ -284,28 +259,18 @@ func (p *Provider) ListMajorVersions(ctx context.Context) ([]string, error) {
 	return versions, nil
 }
 
-// ListMajorVersionsWithLTS implements registry.Provider. LTS was
-// already present in the same response used by ListMajorVersions
-// (confirmed directly in BellSoft's own documented example, an "LTS":
-// true field on each release) -- no extra network call needed, it
-// simply wasn't being read until this was added.
+// ListMajorVersionsWithLTS implements registry.Provider. LTS is
+// already present in the same response ListMajorVersions uses (an
+// "LTS" field on each release).
 //
-// Deliberately does NOT send version-modifier=latest -- a real,
-// confirmed bug: every real-world use of that parameter (BellSoft's
-// own published API docs, and multiple independent third-party
-// package-manager manifests actually deployed against the live API)
-// pairs it with a SPECIFIC version-feature=<major> filter, to get
-// "the one latest patch WITHIN this one major" -- never used bare,
-// with no major specified, to mean "one latest release per major".
-// Sent without a major filter (as this endpoint was originally
-// written), BellSoft correctly returns just the single, globally
-// newest release across ALL majors combined -- explaining the exact
-// reported symptom: the picker showed only one major version (the
-// current newest), not the full list this function is meant to
-// discover. Omitting it returns the full release list across every
-// major instead, which the dedup loop below was already correctly
-// written to handle -- the bug was entirely in the query being too
-// narrow, never in the collection logic itself.
+// Deliberately does NOT send version-modifier=latest: that parameter
+// is meant to pair with a specific version-feature=<major> filter
+// ("the latest patch within this major"), not used bare to mean "one
+// latest release per major" -- sent without a major filter, BellSoft
+// returns just the single, globally newest release across all
+// majors, which previously caused the picker to show only one major
+// version. Omitting it returns the full release list instead, which
+// the dedup loop below already handles correctly.
 func (p *Provider) ListMajorVersionsWithLTS(ctx context.Context) ([]registry.MajorVersionInfo, error) {
 	q := url.Values{}
 	q.Set("os", "macos")
@@ -352,9 +317,7 @@ func (p *Provider) ListMajorVersionsWithLTS(ctx context.Context) ([]registry.Maj
 		return nil, registry.ErrVersionNotFound
 	}
 
-	// Newest-first, matching the convention every other version list
-	// in this tool already uses.
-	sortDescending(majors)
+	sortDescending(majors) // newest-first
 
 	infos := make([]registry.MajorVersionInfo, len(majors))
 	for i, m := range majors {
@@ -375,12 +338,8 @@ func sortDescending(nums []int) {
 }
 
 // stripBuildMetadata removes a vendor build-number suffix like "+11"
-// from a version string, e.g. "11.0.5+11" -> "11.0.5" -- same
-// reasoning as temurin's own copy of this function (kept as an
-// independent duplicate rather than shared, to keep this round's
-// changes contained to this new package rather than touching
-// Temurin's already-tested code): users type bare versions everywhere
-// in this tool, never vendor build metadata.
+// from a version string, e.g. "11.0.5+11" -> "11.0.5" -- users type
+// bare versions, never vendor build metadata.
 func stripBuildMetadata(version string) string {
 	if i := strings.IndexByte(version, '+'); i != -1 {
 		return version[:i]
@@ -397,16 +356,10 @@ func majorVersion(version string) (string, error) {
 	i := strings.IndexByte(version, '.')
 	if i == -1 {
 		// Legacy Liberica Java 8 identifiers use the "8uXXX" scheme
-		// (e.g. "8u504") -- a real, live-reported bug: sent as-is,
-		// this whole string was rejected by BellSoft's own API
-		// ("Unexpected parameter value" for version-feature=8u504).
-		// Confirmed directly from BellSoft's own release notes, which
-		// explicitly state "The version number is 8" for every such
-		// release -- the real major version is the digit run BEFORE
-		// the "u", not the whole identifier. Checked digits-only
-		// (not just "does a 'u' appear anywhere") so an unrelated
-		// future string shape that happens to contain a literal "u"
-		// isn't silently mismatched into this legacy case.
+		// (e.g. "8u504") -- BellSoft's API rejects this string as-is
+		// ("Unexpected parameter value"); the real major version is
+		// the digit run before the "u". Checked digits-only so an
+		// unrelated string containing a literal "u" isn't mismatched.
 		if j := strings.IndexByte(version, 'u'); j > 0 && isAllDigits(version[:j]) {
 			return version[:j], nil
 		}

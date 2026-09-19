@@ -23,11 +23,6 @@ func newSearchCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName, vendorName := args[0], args[1]
 
-			// --format=json branches off before requireTool's own
-			// session.Out printing -- both the majors and patches
-			// shapes below need the same tool/vendor validation the
-			// interactive path does, just reported as a JSON error
-			// instead of printed text.
 			if outputFormat == FormatJSON {
 				major := ""
 				if len(args) == 3 {
@@ -67,10 +62,8 @@ func newSearchCmd() *cobra.Command {
 	}
 }
 
-// searchMajors prints every major/feature version a vendor currently
-// offers, with LTS releases flagged -- both Temurin's and Liberica's
-// APIs already report this directly, no extra network call beyond
-// what listing majors already makes.
+// searchMajors prints every major/feature version a vendor offers,
+// with LTS releases flagged.
 func searchMajors(ctx context.Context, tool tooldef.Tool, provider registry.Provider, header string) error {
 	infos, err := provider.ListMajorVersionsWithLTS(ctx)
 	if err != nil {
@@ -96,9 +89,7 @@ func searchMajors(ctx context.Context, tool tooldef.Tool, provider registry.Prov
 }
 
 // searchPatches prints every patch version within one major, marking
-// whichever one (if any) is already installed or registered locally --
-// a single marker only (see design discussion: no separate "currently
-// active" or "default" indicator, to avoid crowding).
+// whichever one is already installed or registered locally.
 func searchPatches(ctx context.Context, tool tooldef.Tool, provider registry.Provider, header, major string) error {
 	patches, err := provider.ListPatchVersions(ctx, major, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
@@ -116,11 +107,9 @@ func searchPatches(ctx context.Context, tool tooldef.Tool, provider registry.Pro
 		return err
 	}
 
-	// installedFor maps a bare patch (e.g. "21.0.2") to the matching
-	// local inventory entry, if any -- checking BOTH the current,
-	// vendor-suffixed naming convention (e.g. "21.0.2-temurin") AND a
-	// bare match with no suffix at all, for backward compatibility
-	// with installs that predate vendor-suffixed naming.
+	// Checks both the vendor-suffixed and bare naming conventions,
+	// for backward compatibility with installs that predate
+	// vendor-suffixed naming.
 	installed, _ := inventory.Scan(tool)
 	installedFor := make(map[string]inventory.Version, len(installed))
 	for _, v := range installed {
@@ -143,10 +132,8 @@ func searchPatches(ctx context.Context, tool tooldef.Tool, provider registry.Pro
 	return nil
 }
 
-// installedMarker builds the single "already have this" indicator --
-// distinguishing a real, sk-installed entry from a symlinked
-// (registered via `add`) one, reusing the exact phrase already
-// established in `list`'s own output for that same distinction.
+// installedMarker builds the "already have this" indicator,
+// distinguishing a real install from a symlinked `add` entry.
 func installedMarker(v inventory.Version) string {
 	if v.External {
 		return "\u2713 installed (not managed by SDK Keeper)"
@@ -154,10 +141,8 @@ func installedMarker(v inventory.Version) string {
 	return "\u2713 installed"
 }
 
-// capitalize uppercases just the first letter, e.g. "temurin" ->
-// "Temurin" -- for display headers only; provider.Name() itself stays
-// lowercase everywhere else (command arguments, version-folder
-// suffixes), matching the rest of this tool's naming conventions.
+// capitalize uppercases just the first letter, for display headers
+// only -- provider.Name() itself stays lowercase everywhere else.
 func capitalize(s string) string {
 	if s == "" {
 		return s
@@ -165,16 +150,9 @@ func capitalize(s string) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// searchEntry and searchData are `search`'s --format=json success
-// `data` shape (design doc §3). LTS is a pointer, present only for
-// the major-listing mode (no major arg given) -- design doc §3's own
-// sample only covers the PATCH-listing mode ("available":
-// [{version, isInstalled}]); it doesn't address search's other real
-// mode (major versions, each with an LTS flag, no installed concept)
-// at all. Rather than force majors into the exact same
-// {version,isInstalled} shape and silently drop LTS entirely, this
-// adds one omitempty field for that mode -- additive, not a
-// contradiction of what the doc DOES specify.
+// searchEntry/searchData are search's --format=json success shape.
+// LTS is a pointer, present only in the major-listing mode (no major
+// arg given); the patch-listing mode uses IsInstalled instead.
 type searchEntry struct {
 	Version     string `json:"version"`
 	IsInstalled bool   `json:"isInstalled"`
@@ -187,11 +165,8 @@ type searchData struct {
 	Available []searchEntry `json:"available"`
 }
 
-// buildSearchJSON is `search`'s --format=json counterpart --
-// validates tool/vendor exactly like the interactive path, then
-// dispatches to the majors or patches shape depending on whether a
-// major was given, matching the interactive RunE's own len(args)
-// branch.
+// buildSearchJSON validates tool/vendor like the interactive path,
+// then dispatches to the majors or patches shape.
 func buildSearchJSON(ctx context.Context, toolName, vendorName, major string) (*searchData, *jsonError) {
 	tool, ok := tooldef.Get(toolName)
 	if !ok {
@@ -237,10 +212,8 @@ func buildSearchPatchesJSON(ctx context.Context, tool tooldef.Tool, provider reg
 		return nil, &jsonError{Code: ErrCodeInternalError, Message: fmt.Sprintf("could not list %s %s versions: %s", tool.DisplayName, major, err)}
 	}
 
-	// Same dual bare/vendor-suffixed lookup as searchPatches' own text
-	// rendering (see that function's doc comment for why both forms
-	// are checked) -- kept identical here so the JSON and text paths
-	// can never disagree about which patches are already installed.
+	// Same dual bare/vendor-suffixed lookup as searchPatches, so the
+	// JSON and text paths never disagree on what's installed.
 	installed, _ := inventory.Scan(tool)
 	installedFor := make(map[string]inventory.Version, len(installed))
 	for _, v := range installed {

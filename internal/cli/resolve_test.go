@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -780,5 +781,51 @@ func TestResolveUse_ExplicitVersionFoundStillChecksJavaPrerequisite(t *testing.T
 	}
 	if !strings.Contains(out, "No JDK selected") {
 		t.Errorf("expected the java prerequisite check to still run when the requested Maven version genuinely exists, got: %q", out)
+	}
+}
+
+// TestResolveUse_NoVersionWithoutTTYReturnsVersionRequired is design
+// doc §6's own "harden the existing automatic TTY-detection fallback"
+// -- when a picker WOULD be shown (no version given, at least one
+// real candidate installed) but sess.HasTTY is false (a zero-value
+// Session, exactly like every OTHER test in this file that never
+// opens a real terminal), this must return a clean *CLIError with
+// version_required -- the SAME error.code --format=json's own
+// resolveUseJSON reports for the identical situation -- rather than
+// letting the picker's own low-level "/dev/tty could not be opened"
+// wording leak through to a real user.
+func TestResolveUse_NoVersionWithoutTTYReturnsVersionRequired(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	sess := &term.Session{Out: w} // HasTTY defaults to false
+
+	_, resolveErr := resolveUse(sess, term.Styles{}, "java", "", "")
+
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	out := buf.String()
+
+	var cliErr *CLIError
+	if !errors.As(resolveErr, &cliErr) {
+		t.Fatalf("expected a *CLIError, got: %T (%v)", resolveErr, resolveErr)
+	}
+	if cliErr.Code != ErrCodeVersionRequired {
+		t.Errorf("expected version_required, got %q", cliErr.Code)
+	}
+	if ExitCode(resolveErr) != 101 {
+		t.Errorf("expected exit code 101, got %d", ExitCode(resolveErr))
+	}
+	if strings.Contains(out, "/dev/tty") {
+		t.Errorf("expected the picker's own low-level wording to NEVER reach the user, got: %q", out)
+	}
+	if !strings.Contains(out, "a version is required") {
+		t.Errorf("expected a clear, actionable message, got: %q", out)
 	}
 }

@@ -1,17 +1,9 @@
 sk() {
-    # --format=json is checked FIRST, anywhere in the argument list --
-    # not just as $1 -- and, if present, always takes the plain,
-    # non-eval branch below, regardless of whether $1 is "use"/
-    # "remove". A real, found gap: this dispatch used to key off $1
-    # alone, so `sk --format=json use java 21...` (flag BEFORE the
-    # subcommand) was accidentally safe -- $1 is "--format=json", not
-    # "use" -- while `sk use --format=json java 21...` (flag AFTER)
-    # was not: $1 WAS "use", so this would `eval` sk's own raw JSON
-    # object as shell code. --format=json is fundamentally a report,
-    # never a shell action (see the design doc's own §6/§8 -- it is
-    # deliberately kept independent of the eval/shell-format-json
-    # machinery below), so it must NEVER reach eval, no matter where
-    # in the argument list it appears or what value follows it.
+    # --format=json is checked anywhere in the argument list, not just
+    # $1, and always takes the plain, non-eval branch below -- it must
+    # never reach eval, since it's a report, not a shell action, and
+    # `sk use --format=json ...` (flag after the subcommand) would
+    # otherwise eval sk's raw JSON output as shell code.
     local arg has_format=0
     for arg in "$@"; do
         if [[ "$arg" == "--format" || "$arg" == --format=* ]]; then

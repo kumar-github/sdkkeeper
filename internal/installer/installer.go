@@ -1,52 +1,30 @@
 // Package installer implements the atomic download -> verify ->
-// extract -> place sequence for turning a resolved registry.Asset into
-// a real, usable version folder. Deliberately decoupled from any
-// specific vendor (registry.Provider) or tool (tooldef.Tool) -- this
-// package only ever deals with "here's a URL, a checksum, and a
-// destination," making it fully testable against a local fake HTTP
-// server, without needing real network access or a real JDK archive.
+// extract -> place sequence for turning a resolved registry.Asset
+// into a real, usable version folder. Decoupled from any specific
+// vendor or tool -- it only deals with "here's a URL, a checksum, and
+// a destination," so it's fully testable against a local fake HTTP
+// server.
 //
-// Design choices below are directly informed by researching real
-// failure modes in Homebrew and SDKMAN (both long-established,
-// widely-used tools):
+// Design choices, informed by real failure modes in Homebrew and
+// SDKMAN:
 //
-//   - Resume support and a persistent download cache were both
-//     ORIGINALLY, deliberately left out entirely, citing real, cited
-//     bugs in both tools: SDKMAN's sdkman-cli#1288 (resuming via HTTP
-//     byte-range fails permanently if the server doesn't support it,
-//     leaving an install that can never complete without manual
-//     intervention) and sdkman-cli#1005 / several Homebrew issues
-//     (stale or corrupted cached downloads confusing later attempts,
-//     with no automatic recovery). Both were later reconsidered and
-//     implemented, specifically engineered to avoid those exact
-//     failure modes: downloadOnce falls back to a clean, full restart
-//     the moment a server doesn't honor a Range request (confirmed
-//     directly, via
-//     TestDownloadWithRetry_FallsBackToFreshWhenServerIgnoresRange --
-//     never gets stuck retrying a range the server will never honor),
-//     and the (since-removed) cache always re-verified a cached
-//     entry's checksum before trusting it.
-//   - The download cache was REMOVED again after that, for a
-//     genuinely different reason than the one that kept it out
-//     originally: not a correctness bug, but real, accumulating disk
-//     usage with no visibility or cleanup -- every install of every
-//     version left a persistent, silently-growing copy behind, easily
-//     exceeding a gigabyte across a handful of JDKs, that the user had
-//     no way to see or reclaim. Weighed against how uncommon
-//     "reinstall the exact same version later" actually is for a tool
-//     whose own design encourages keeping multiple versions installed
-//     side by side rather than removing and re-fetching them, the
-//     trade-off didn't hold up. Resume support is unaffected by this
-//     and remains -- it's a different feature solving a different
-//     problem (a slow/flaky connection during ONE download), with no
-//     persistent state or disk-usage cost of its own.
+//   - Resume support: falls back to a clean, full restart the moment
+//     a server doesn't honor a Range request, avoiding SDKMAN's own
+//     cited bug (sdkman-cli#1288) where resume fails permanently and
+//     the install can never complete.
+//   - No persistent download cache: removed after real, unbounded
+//     disk usage (every install left a growing copy behind with no
+//     way to reclaim it) outweighed the benefit, given how uncommon
+//     reinstalling the exact same version is for a tool that
+//     encourages keeping multiple versions side by side. Resume
+//     support is unaffected -- a different feature with no
+//     persistent state of its own.
 //   - Always verify the checksum, and retry on either a network
-//     failure OR a checksum mismatch -- matching Homebrew's own
-//     documented behavior ("--retry: Retry if downloading fails or
-//     re-download if the checksum... no longer matches").
-//   - Never write anything to the final destination until everything
-//     has been fully verified and extracted -- the ONLY operation that
-//     touches TargetDir is a single atomic os.Rename at the very end.
+//     failure or a checksum mismatch, matching Homebrew's own
+//     documented --retry behavior.
+//   - Nothing touches the final destination until everything is
+//     verified and extracted -- the only operation on TargetDir is a
+//     single atomic os.Rename at the end.
 package installer
 
 import (
@@ -69,10 +47,8 @@ import (
 	"time"
 )
 
-// ErrAlreadyExists is returned when TargetDir already exists -- Install
-// never overwrites, matching the same non-destructive rule already
-// established for `add` (design doc §10.2): a version already present
-// is never silently replaced.
+// ErrAlreadyExists is returned when TargetDir already exists --
+// Install never overwrites an existing version.
 var ErrAlreadyExists = errors.New("installer: target already exists")
 
 // Options configures a single Install call.
@@ -83,49 +59,33 @@ type Options struct {
 	// Checksum is the expected checksum, lowercase hex, no prefix.
 	Checksum string
 
-	// Filename is the archive's own vendor-published filename (e.g.
-	// "OpenJDK21U-jdk_x64_windows_hotspot_21.0.2_13.zip") -- used
-	// SOLELY to pick the right extractor (see extractorFor), by the
-	// archive's REAL file extension. Deliberately NOT derived from
-	// the downloaded archive's own on-disk temp path -- confirmed
-	// directly: downloadWithRetry saves to a randomly-named
-	// os.CreateTemp("download-*") file, which never carries the
-	// original extension at all, so there is no other reliable
-	// source for this information. Required -- Install fails fast,
-	// before any network activity, if this doesn't match a
-	// recognized extension, rather than a confusing failure deep
-	// inside extraction.
+	// Filename is the archive's vendor-published filename, used solely
+	// to pick the right extractor by its real file extension --
+	// downloadWithRetry saves to a randomly-named temp file with no
+	// extension of its own, so there's no other source for this.
+	// Required; Install fails fast if it's unrecognized.
 	Filename string
 
 	// ChecksumAlgorithm names which hash Checksum is -- registry.SHA256
-	// or registry.SHA1. Not every vendor publishes the same algorithm
-	// (Temurin: SHA-256; Liberica: SHA-1 only, confirmed directly from
-	// their own API's documented responses) -- this makes verification
-	// correct regardless of which one resolved the asset, rather than
-	// assuming SHA-256 universally. Defaults to registry.SHA256 if
-	// left empty, preserving existing callers that predate this field.
+	// or registry.SHA1. Not every vendor publishes the same one
+	// (Temurin: SHA-256; Liberica: SHA-1 only). Defaults to SHA256 if
+	// empty.
 	ChecksumAlgorithm string
 
-	// TargetDir is the final, real directory this version should end
-	// up at, e.g. ~/.sdkkeeper/candidates/java/JDK-21.0.2-temurin.
-	// Must not already exist.
+	// TargetDir is the final directory this version ends up at, e.g.
+	// ~/.sdkkeeper/candidates/java/JDK-21.0.2-temurin. Must not
+	// already exist.
 	TargetDir string
 
-	// TempRoot is where scratch work happens, e.g.
-	// ~/.sdkkeeper/tmp. MUST be on the same filesystem as TargetDir's
-	// parent, or the final placement can't be a true atomic rename
-	// (os.Rename silently degrades to non-atomic copy+delete across
-	// filesystems on some platforms).
+	// TempRoot is where scratch work happens, e.g. ~/.sdkkeeper/tmp.
+	// Must be on the same filesystem as TargetDir's parent, or the
+	// final placement can't be a true atomic rename.
 	TempRoot string
 
 	// MaxAttempts is how many times to retry the download+verify cycle
-	// on failure (network error or checksum mismatch) before giving
-	// up. Each retry resumes from wherever the previous attempt left
-	// off when the server supports it (falls back to a fresh restart
-	// otherwise) -- see downloadOnce's own doc comment for the full
-	// design, including how it specifically avoids the stuck-forever
-	// failure mode this package's own top-level comment documents a
-	// real instance of in SDKMAN.
+	// before giving up. Each retry resumes where the previous attempt
+	// left off when the server supports it, falling back to a fresh
+	// restart otherwise -- see downloadOnce.
 	MaxAttempts int
 
 	// RetryDelay is how long to wait between attempts. A simple fixed
@@ -360,19 +320,13 @@ func Install(ctx context.Context, opts Options) error {
 	return nil
 }
 
-// progressReader wraps an io.Reader, calling onUpdate periodically with
-// bytes read so far and the total (as reported by Content-Length; -1
-// if the server didn't send one, e.g. chunked transfer encoding).
-// Throttled to a few times a second (not on every Read call, which
-// could be many times per second for a fast connection with a small
-// buffer size) -- deliberately NOT a fancy animated progress bar, per
-// the explicit ask; this just rate-limits how often the callback
-// fires so the caller's own rendering isn't overwhelmed. Always calls
-// onUpdate one final time when the read completes (err != nil, most
-// commonly io.EOF), with final=true, regardless of the time-based
-// throttle -- so the caller always gets an unambiguous "this is truly
-// done" signal, rather than having to guess from read>=total, which
-// breaks when total is unknown (-1).
+// progressReader wraps an io.Reader, calling onUpdate periodically
+// with bytes read so far and the total (-1 if the server didn't send
+// Content-Length). Throttled to a few times a second so the caller's
+// rendering isn't overwhelmed, but always calls onUpdate one final
+// time with final=true when the read completes, regardless of the
+// throttle -- an unambiguous "done" signal that doesn't rely on
+// read>=total, which breaks when total is unknown.
 type progressReader struct {
 	r        io.Reader
 	total    int64
@@ -396,17 +350,10 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// runWithThresholdedProgress runs work, calling onSlow (if non-nil)
-// only if work is STILL running after threshold -- so a fast operation
-// stays silent (avoiding a message that would just flash by unread),
-// while a genuinely slow one gets an honest, timely status message
-// instead of leaving the user looking at a silent gap. onSlow's timer
-// is stopped as soon as work finishes, whichever happens first -- no
-// message, no goroutine leak. Extracted as its own function
-// specifically so this timing logic can be tested directly, with a
-// deterministic fake `work` (e.g. a controlled time.Sleep), rather
-// than depending on real, inherently variable filesystem/extraction
-// speed to land on either side of the threshold reliably.
+// runWithThresholdedProgress runs work, calling onSlow only if work
+// is still running after threshold -- a fast operation stays silent,
+// a slow one gets a timely status message instead of a silent gap.
+// The timer stops as soon as work finishes, whichever comes first.
 func runWithThresholdedProgress(threshold time.Duration, onSlow func(), work func() error) error {
 	done := make(chan struct{})
 	go func() {
@@ -471,28 +418,19 @@ func downloadWithRetry(ctx context.Context, opts Options) (string, error) {
 
 // downloadOnce performs one download attempt, verifying the result's
 // checksum before returning. resumePath, if non-empty, names a
-// partial file from a PRIOR failed attempt worth resuming from via an
-// HTTP Range request -- pass "" for a completely fresh attempt (the
-// ONLY thing the very first attempt of any download ever does, so
-// that specific call shape, and everything it does, is byte-for-byte
-// identical to how this function worked before resume support
-// existed at all).
+// partial file from a prior failed attempt worth resuming via an HTTP
+// Range request; pass "" for a fresh attempt.
 //
 // Returns (path, "", nil) on success. On failure, returns ("",
 // resumableAt, err) -- resumableAt names a partial file worth passing
-// to the NEXT attempt's resumePath (empty if there's nothing worth
-// resuming: the server doesn't support ranges, or the completed file
-// was simply WRONG, not partial, e.g. a checksum mismatch).
+// to the next attempt (empty if the server doesn't support ranges, or
+// the completed file was simply wrong, e.g. a checksum mismatch).
 //
-// A real, deliberate design choice worth calling out: hash.Hash has
-// no portable way to save/restore its internal state ACROSS a brand
-// new http.Request/response cycle (the two connections are entirely
-// unrelated as far as the hasher is concerned) -- so rather than
-// attempt anything fragile there, a resumed attempt simply re-reads
-// the bytes ALREADY on disk through a fresh hasher once, before
-// appending anything new. Simple, always correct, and the extra read
-// is negligible next to the network time already saved by not
-// re-downloading those same bytes.
+// hash.Hash can't save/restore its state across a new HTTP
+// request/response cycle, so a resumed attempt re-reads the bytes
+// already on disk through a fresh hasher once before appending new
+// data -- simple, correct, and negligible next to the network time
+// already saved.
 func downloadOnce(ctx context.Context, opts Options, resumePath string) (path string, resumableAt string, err error) {
 	var startOffset int64
 	if resumePath != "" {
@@ -622,24 +560,15 @@ func downloadOnce(ctx context.Context, opts Options, resumePath string) (path st
 	return finalPath, "", nil
 }
 
-// extractor is the shape shared by extractTarGz and extractZip --
-// letting Install pick the right one for a given archive, by the
-// archive's REAL file extension (Options.Filename, the vendor's own
-// published name), not by host OS. Deliberately NOT a switch on
-// runtime.GOOS: a future vendor could plausibly package a given OS
-// differently than expected (or a new OS/format combination could be
-// added later), so this dispatches on the actual file being
-// extracted, never an assumption about what SHOULD have been
-// downloaded for the current platform.
+// extractor is the shape shared by extractTarGz and extractZip,
+// letting Install pick the right one by the archive's real file
+// extension (Options.Filename), not by host OS -- a future vendor
+// could package a given OS differently than expected.
 type extractor func(archivePath, destDir string, onProgress func(count int64, final bool)) error
 
 // extractorFor returns the right extractor for filename's extension,
-// or a clear, specific error naming the unrecognized extension --
-// checked via Install before any download happens (see its own
-// comment), so a genuinely new/unexpected archive format fails fast
-// and legibly, rather than surfacing as a confusing "not a valid
-// gzip archive" (or similar) deep inside extraction, after real
-// network work has already completed.
+// or a clear error naming it -- checked before any download happens,
+// so an unexpected format fails fast rather than deep in extraction.
 func extractorFor(filename string) (extractor, error) {
 	switch {
 	case strings.HasSuffix(filename, ".tar.gz"):
@@ -652,18 +581,13 @@ func extractorFor(filename string) (extractor, error) {
 }
 
 // extractTarGz extracts a .tar.gz archive into destDir. Rejects any
-// entry whose resolved path would escape destDir (a "Zip Slip"-style
-// path-traversal guard) -- defense in depth even though the archive's
-// checksum has already been verified against the vendor's published
-// value, since checksum verification confirms integrity, not that the
-// archive's internal structure is well-formed.
+// entry whose resolved path would escape destDir (a Zip Slip guard)
+// -- defense in depth, since checksum verification confirms integrity
+// but not internal structure.
 //
-// onProgress, if non-nil, is called with the number of entries
-// processed so far -- throttled to the same cadence as download
-// progress (progressUpdateInterval), plus always once more on the
-// final entry (final=true), regardless of the throttle, so the
-// caller's last update always reflects the true final count. Safe to
-// pass nil (e.g. from tests that don't care about progress).
+// onProgress, if non-nil, is called with entries processed so far,
+// throttled like download progress, plus always once more on the
+// final entry. Safe to pass nil.
 func extractTarGz(archivePath, destDir string, onProgress func(count int64, final bool)) error {
 	f, err := os.Open(archivePath)
 	if err != nil {

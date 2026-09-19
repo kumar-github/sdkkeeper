@@ -27,11 +27,6 @@ func newDefaultCmd() *cobra.Command {
 				versionArg = args[1]
 			}
 
-			// --format=json branches off before ANY of the interactive
-			// tool-lookup/session.Out logic below -- design doc §2
-			// gives `default` the exact same activationPayload shape
-			// as `use`/`remove`, covering set, show, and clear all
-			// through the same "action" enum.
 			if outputFormat == FormatJSON {
 				data, jerr := resolveDefaultJSON(toolName, versionArg)
 				return emitJSON(data, jerr)
@@ -55,16 +50,6 @@ func newDefaultCmd() *cobra.Command {
 				if current == "" {
 					fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("No default %s set.", tool.DisplayName)))
 				} else {
-					// Mirrors the SET confirmation's own reminder
-					// wording exactly -- a real gap found via actual
-					// use: this bare, query-only path dropped the
-					// same "run `sk use ... default` in each new
-					// shell to activate it" reminder the SET
-					// confirmation deliberately includes, even though
-					// it's answering the exact same "what's my
-					// default" question and carries the exact same
-					// risk of a user assuming a stored default is
-					// already active.
 					fmt.Fprintln(session.Out, styles.Neutral.Render(
 						fmt.Sprintf("Default %s: %s — run `sk use %s default` in each new shell to activate it", tool.DisplayName, current, tool.Name),
 					))
@@ -74,13 +59,10 @@ func newDefaultCmd() *cobra.Command {
 
 			value := args[1]
 
-			// "null" clears the default -- occupies the exact same
-			// argument slot a real version would, matching the same
-			// "special value stays in the normal value's position"
-			// convention as "default" does for `use` (see resolveUse's
-			// own comment on this). Never a real version identifier
-			// could collide with this, since every real one always
-			// carries a vendor suffix.
+			// "null" clears the default -- occupies the same
+			// argument slot a real version would; no real version
+			// identifier could collide, since every one carries a
+			// vendor suffix.
 			if value == "null" {
 				err := clearDefaultFile(tool)
 				if err != nil {
@@ -93,13 +75,9 @@ func newDefaultCmd() *cobra.Command {
 				return nil
 			}
 
-			// Setting a default is validated against what's actually
-			// installed FIRST -- refusing a typo here, immediately,
-			// rather than letting it silently succeed and only
-			// surface much later when `sk use <tool> default` fails
-			// on a version that was never real to begin with. Matches
-			// how `add`/`install` already validate upfront rather
-			// than defer failures.
+			// Validated against what's actually installed first,
+			// refusing a typo immediately rather than deferring the
+			// failure to a later `sk use <tool> default`.
 			versionDir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+value)
 			if _, err := os.Lstat(versionDir); err != nil {
 				fmt.Fprintln(session.Out)
@@ -127,11 +105,9 @@ func newDefaultCmd() *cobra.Command {
 	}
 }
 
-// resolveDefaultJSON is `default`'s --format=json counterpart --
-// covers all three of the interactive command's shapes (show/set/
-// clear) under the SAME activationPayload/action-enum design doc §2
-// gives `use`/`remove`, since `default` is explicitly called out
-// there as "the same kind of state-mutating operation".
+// resolveDefaultJSON is default's --format=json counterpart, covering
+// all three interactive shapes (show/set/clear) under the same
+// activationPayload/action enum as use/remove.
 func resolveDefaultJSON(toolName, versionArg string) (*activationPayload, *jsonError) {
 	tool, ok := tooldef.Get(toolName)
 	if !ok {
@@ -139,12 +115,9 @@ func resolveDefaultJSON(toolName, versionArg string) (*activationPayload, *jsonE
 	}
 
 	if versionArg == "" {
-		// Show the current default. Reported under the SAME
-		// "defaulted" action value used for actually setting one --
-		// design doc §2's enum has no separate "show" value, and a
-		// default that's currently set IS "defaulted" regardless of
-		// whether THIS call set it or merely reports one already set
-		// by an earlier call.
+		// A default that's currently set is "defaulted" whether this
+		// call set it or is merely reporting one set earlier -- the
+		// enum has no separate "show" value.
 		current, err := readDefault(tool)
 		if err != nil {
 			return nil, &jsonError{Code: ErrCodeInternalError, Message: err.Error()}
@@ -172,11 +145,6 @@ func resolveDefaultJSON(toolName, versionArg string) (*activationPayload, *jsonE
 		}, nil
 	}
 
-	// Setting a default -- validated against what's actually installed
-	// FIRST, same principle as the interactive path (reuses
-	// inventory.Find rather than the interactive path's direct
-	// os.Lstat, since that's the same "does this actually exist" check
-	// every other JSON-path function in this package already uses).
 	if _, ok := inventory.Find(tool, versionArg); !ok {
 		return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("%s%s is not installed -- cannot set it as default", tool.FolderPrefix, versionArg)}
 	}

@@ -6,31 +6,17 @@ import (
 	"time"
 )
 
-// renderDownloadProgress builds the hybrid progress line -- a bar,
-// percentage, byte counts, and now speed/ETA together, e.g.
-// "[####################................] 58% (30.2 MB / 52.1 MB) 2.3 MB/s, ETA 9s".
-// If total is unknown (-1, server didn't report Content-Length), falls
-// back to just showing bytes read so far (plus speed, if computable)
-// -- a percentage or a bar implies a known target, and showing one
-// against an unknown total would be actively misleading, not just
-// incomplete. ETA specifically also needs a known total (there's
-// nothing to estimate time "until" otherwise), so it's omitted there
-// even though speed alone still is shown.
+// renderDownloadProgress builds the progress line: a bar, percentage,
+// byte counts, and speed/ETA, e.g. "[####...] 58% (30.2 MB / 52.1 MB)
+// 2.3 MB/s, ETA 9s". If total is unknown, falls back to just bytes
+// read plus speed -- a bar/percentage against an unknown total would
+// be misleading. elapsed is passed in since this function has no
+// notion of when the download started; install.go tracks that.
 //
-// elapsed is the time since the download started -- passed in rather
-// than computed here, since this function has no notion of "when did
-// this download begin" on its own; the caller (install.go) is what
-// tracks that, the same way it already tracks downloadedBytes.
-//
-// Known, deliberately accepted imprecision for a RESUMED download
-// specifically (see downloadOnce's own resume-support comment): read
-// includes bytes that were already on disk from a prior, failed
-// attempt, while elapsed only covers THIS attempt's own time -- so
-// speed briefly overstates itself right after a resume begins. Not
-// fixed with extra parameters/complexity here deliberately: it's
-// purely cosmetic (the bar/percentage/ETA are still correct either
-// way), and self-corrects within a few seconds as newly-downloaded
-// bytes come to dominate the average.
+// For a resumed download, read includes bytes already on disk from a
+// prior attempt while elapsed only covers this attempt, so speed
+// briefly overstates itself -- cosmetic only, and self-corrects
+// within a few seconds.
 func renderDownloadProgress(read, total int64, elapsed time.Duration) string {
 	if total <= 0 {
 		// Composes as "Downloading X.X MB" at the call site -- no
@@ -58,10 +44,9 @@ func renderDownloadProgress(read, total int64, elapsed time.Duration) string {
 	return line
 }
 
-// formatSpeed returns "X.X MB/s", or "" if not yet computable (no
-// bytes read yet, or no meaningful time has elapsed -- avoiding a
-// divide-by-zero AND avoiding a wildly inflated, meaningless rate
-// from a near-zero elapsed duration on the very first progress tick).
+// formatSpeed returns "X.X MB/s", or "" if not yet computable --
+// avoids a divide-by-zero and a wildly inflated rate from a near-zero
+// elapsed duration on the first progress tick.
 func formatSpeed(read int64, elapsed time.Duration) string {
 	if read <= 0 || elapsed < 100*time.Millisecond {
 		return ""
@@ -70,10 +55,8 @@ func formatSpeed(read int64, elapsed time.Duration) string {
 	return fmt.Sprintf("%.1f MB/s", bytesPerSec/(1024*1024))
 }
 
-// formatSpeedAndETA returns "X.X MB/s, ETA Ys" (or "Xm Ys" past a
-// minute), or "" if not yet computable -- same guards as formatSpeed,
-// plus total must be known (an ETA is meaningless without a target to
-// estimate time "until").
+// formatSpeedAndETA returns "X.X MB/s, ETA Ys", or "" if not yet
+// computable -- same guards as formatSpeed, plus total must be known.
 func formatSpeedAndETA(read, total int64, elapsed time.Duration) string {
 	speed := formatSpeed(read, elapsed)
 	if speed == "" || total <= 0 || read >= total {
@@ -84,10 +67,8 @@ func formatSpeedAndETA(read, total int64, elapsed time.Duration) string {
 	return fmt.Sprintf("%s, ETA %s", speed, formatDuration(remaining))
 }
 
-// formatDuration renders a number of seconds as "Ys" under a minute,
-// or "Xm Ys" at or past one -- ETAs longer than that are common
-// enough for a slow connection or a large JDK that "127s" would be a
-// genuinely harder number to read at a glance than "2m 7s".
+// formatDuration renders seconds as "Ys" under a minute, or "Xm Ys"
+// past one.
 func formatDuration(seconds float64) string {
 	total := int(seconds + 0.5) // round to nearest second
 	if total < 60 {

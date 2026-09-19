@@ -11,14 +11,10 @@ import (
 )
 
 // findActiveVersion returns the Version whose HomePath matches
-// currentEnvValue, if any -- extracted as its own function specifically
-// so this matching logic can be tested directly, without needing a
-// real terminal session. Forward-transforms each known version the
-// exact same way `use` did when it originally set this variable,
-// rather than trying to reverse-parse the env var's value back into a
-// version number (fragile -- would need to know exactly how to strip
-// vendor/OS-specific suffixes, like the java-on-darwin Contents/Home
-// path).
+// currentEnvValue, if any. Forward-transforms each known version the
+// same way `use` did when it set the variable, rather than reverse-
+// parsing the value (fragile -- e.g. java's darwin Contents/Home
+// suffix).
 func findActiveVersion(tool tooldef.Tool, versions []inventory.Version, currentEnvValue string) (inventory.Version, bool) {
 	for _, v := range versions {
 		if tool.HomePath(v.Path) == currentEnvValue {
@@ -66,12 +62,9 @@ func newCurrentCmd() *cobra.Command {
 				return nil
 			}
 
-			// The env var IS set, but doesn't match any version sk
-			// currently knows about -- e.g. set manually outside sk,
-			// or the matching version was `sk remove`d after being
-			// activated earlier in this same shell session. Still
-			// genuinely useful to show the raw value, rather than
-			// claim nothing is active when something clearly is.
+			// Set, but doesn't match any known version -- e.g. set
+			// manually, or removed after activation. Still useful to
+			// show the raw value rather than claim nothing is active.
 			fmt.Fprintln(session.Out, styles.Neutral.Render(
 				fmt.Sprintf("%s=%s (does not match any version SDK Keeper currently knows about)", tool.EnvVar, current),
 			))
@@ -80,12 +73,9 @@ func newCurrentCmd() *cobra.Command {
 	}
 }
 
-// activeVersionPayload and currentData are `current`'s --format=json
-// success `data` shape (design doc §3). Active is a pointer so
-// "nothing active" serializes as a literal JSON null, exactly
-// matching the doc's own second sample -- explicitly called out there
-// as "a valid, non-error state", so buildCurrentJSON below never
-// returns a jsonError for this case.
+// activeVersionPayload/currentData are current's --format=json
+// success shape. Active is a pointer so "nothing active" serializes
+// as JSON null, a valid non-error state.
 type activeVersionPayload struct {
 	Version string  `json:"version"`
 	Vendor  *string `json:"vendor"`
@@ -96,14 +86,9 @@ type currentData struct {
 	Active *activeVersionPayload `json:"active"`
 }
 
-// buildCurrentJSON is `current`'s --format=json counterpart. When the
-// tool's env var is set but doesn't match any version sk currently
-// recognizes (e.g. set manually outside sk, or removed after being
-// activated earlier in this shell), this reports active: null rather
-// than the raw, unrecognized value -- design doc §3's schema only
-// defines {version, vendor} or null for `active`, with no third shape
-// for an unmatched raw value, so this stays strictly within what's
-// actually documented rather than inventing an undocumented field.
+// buildCurrentJSON reports active: null both when nothing is set and
+// when the env var doesn't match any known version -- the schema has
+// no third shape for an unmatched raw value.
 func buildCurrentJSON(toolName string) (*currentData, *jsonError) {
 	tool, ok := tooldef.Get(toolName)
 	if !ok {

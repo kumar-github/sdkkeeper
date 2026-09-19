@@ -93,13 +93,11 @@ func Execute(version string) error {
 	root.PersistentFlags().StringVar(&shellFormatFlag, "shell-format", "", "")
 	root.PersistentFlags().MarkHidden("shell-format")
 
-	// --format is the stable, DOCUMENTED, external-facing counterpart
-	// to --shell-format -- deliberately NOT hidden (design doc §7/§8:
-	// the two are kept permanently separate, and this one is meant to
-	// actually be discovered via `sk --help`). Registered as a custom
-	// pflag.Value, not a plain StringVar, specifically so an
-	// unrecognized value is a hard parse-time error rather than
-	// silently accepted (see formatFlagValue's own doc comment).
+	// --format is the stable, documented, external-facing counterpart
+	// to --shell-format -- not hidden, since it's meant to be
+	// discovered via `sk --help`. A custom pflag.Value rather than a
+	// plain StringVar so an unrecognized value is a hard parse-time
+	// error instead of being silently accepted.
 	root.PersistentFlags().Var(formatFlagValue{}, "format", `output format for machine consumption ("json")`)
 
 	root.AddCommand(newUseCmd())
