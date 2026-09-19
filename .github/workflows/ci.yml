@@ -2,32 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 jobs:
-  # Build, vet, and test on all three real target platforms. Windows
-  # and macOS runners give genuine execution here, not just cross-
-  # compilation -- the actual binary runs, on the actual OS.
   build-and-test:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest deliberately NOT used -- a real, confirmed,
-        # currently-open upstream issue: GitHub's macos-latest image
-        # now resolves to macOS 26 "Tahoe", which has an active,
-        # widely-reported dyld/Go toolchain incompatibility (test
-        # binaries fail to even START with "missing LC_UUID load
-        # command" + "signal: abort trap") -- confirmed directly from
-        # Go's own issue tracker (golang/go#78012) and independently
-        # by an unrelated project (Bazel) hitting the identical dyld
-        # failure on the same macOS version, fixed there only by a
-        # newer Bazel release. This is NOT a bug in this project's own
-        # code -- pinned to macos-14 (pre-Tahoe, known-good) until
-        # upstream Go ships a fix, at which point this can safely
-        # revert to macos-latest.
-        os: [ ubuntu-latest, macos-14, windows-latest ]
+        # macos-latest is pinned to macos-14: macos-latest (Tahoe) has an
+        # open Go/dyld incompatibility (golang/go#78012). Revert once fixed upstream.
+        os: [ubuntu-latest, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -71,32 +57,11 @@ jobs:
           "$BIN" version
           "$BIN" list java
 
-      # Real, genuinely automated regression checks -- NOT windows,
-      # since this is a zsh script (Windows has no zsh). A real fix
-      # to a real gap: this script previously only PRINTED
-      # descriptions for a human to compare against the output above
-      # it, with no programmatic pass/fail for most of its checks --
-      # meaning a genuine regression could reach here completely
-      # unnoticed, since the script always exited 0 regardless of
-      # whether reality matched the description. Rewritten with a
-      # real assert_*/exit-code framework: this step now genuinely
-      # fails the job on a real divergence, proven directly by
-      # deliberately breaking a real message string during
-      # development and confirming this exact step failed, then
-      # reverting and confirming it passed again.
+      # zsh (needed for the sequence script) isn't preinstalled on ubuntu-latest.
       - name: Sequence-based regression checks (zsh)
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
-          # macOS ships zsh by default; ubuntu-latest does NOT -- a
-          # real, confirmed gap: the first real CI run on Linux failed
-          # immediately with "zsh: command not found", before this
-          # script's own checks ever ran at all. apt-get is a no-op
-          # (already satisfied) on macOS's own package manager
-          # situation, so this is only ever actually needed there --
-          # guarded by command -v rather than matrix.os specifically,
-          # so it stays correct even if a future runner image changes
-          # what's preinstalled.
           if ! command -v zsh >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y zsh
           fi
@@ -104,15 +69,6 @@ jobs:
           chmod +x scripts/sk-sequence-check.sh
           zsh scripts/sk-sequence-check.sh "$BIN"
 
-  # Real Nushell wrapper activation -- mirrors windows-powershell-
-  # wrapper's own reasoning exactly, for the one other real, eval-less
-  # shell integration this project supports. Nushell has no
-  # Invoke-Expression/eval equivalent at all (see init.nu.tmpl's own
-  # design), so this is the one true end-to-end confirmation that its
-  # own, structurally different activation mechanism (parsing sk's
-  # --shell-format=json output and mutating $env.PATH/$env.JAVA_HOME
-  # directly) genuinely works on a real nu process, not just that sk
-  # prints the right JSON (already covered by output_test.go).
   nushell-wrapper:
     runs-on: ubuntu-latest
     steps:
@@ -129,17 +85,8 @@ jobs:
         with:
           version: "0.101"
 
-      # A separate, PRIOR, plain step -- deliberately not part of the
-      # nu script below. A real bug caught while building this exact
-      # test: nu's `source` is resolved at PARSE time, not runtime --
-      # a single script that both `save`s a file and then `source`s
-      # it in the SAME script fails with "File not found", confirmed
-      # directly against a real nu binary, since the file genuinely
-      # doesn't exist yet at the moment nu parses the `source` line.
-      # Separating generation into its own step fixes THAT part --
-      # but is not, on its own, sufficient on a real GitHub Actions
-      # runner specifically; see the source line below for a SECOND,
-      # separate bug this alone doesn't fix.
+      # Generated in a separate step: nu resolves `source` at parse time,
+      # so save+source in one script fails with file-not-found.
       - name: Generate the real wrapper
         run: ./sk init nu > wrapper.nu
 
@@ -148,56 +95,24 @@ jobs:
         run: |
           $env.PATH = ($env.PATH | prepend $env.PWD)
 
-          # A LITERAL, hardcoded absolute path via ${{ github.workspace }}
-          # -- NOT a bare "wrapper.nu", and NOT a dynamically-computed
-          # expression either. A second real, confirmed bug, found only
-          # by an actual CI run: source's file-not-found error persisted
-          # even with wrapper.nu generated in a genuinely separate,
-          # PRIOR step (correctly fixing the original same-script
-          # save-then-source bug this comment used to describe) --
-          # confirmed directly from Nushell's own source (PR #6150,
-          # "Use relative paths as file-relative when parsing a file"):
-          # source resolves a relative path against the PARSED SCRIPT
-          # FILE's own directory, not the process's cwd -- and GitHub
-          # Actions saves each `shell: nu {0}` step's own script to a
-          # temp file under /home/runner/work/_temp/, nothing to do
-          # with the checkout directory wrapper.nu actually lives in.
-          # ${{ github.workspace }} is substituted by GitHub Actions
-          # itself, in the YAML, before nu ever sees this line at all --
-          # so by the time nu's parser evaluates it, it's already a
-          # plain, literal absolute string, satisfying source's own
-          # parse-time-constant requirement while pointing at the right
-          # place regardless of where the temp script itself was saved.
+          # Must be a literal absolute path (substituted by Actions before nu
+          # parses it): nu's `source` resolves relative paths against the
+          # temp script file's own directory, not cwd.
           source ${{ github.workspace }}/wrapper.nu
 
-          # A fake JDK is enough here: this test is about whether the
-          # WRAPPER correctly applies sk's output to the live session,
-          # not about a real download/install (already covered by
-          # installer's own tests).
           let fake_jdk = ($env.PWD | path join "fake-jdk")
           mkdir ($fake_jdk | path join "bin")
           touch ($fake_jdk | path join "bin" "java")
 
           sk add java 99.0.0-test $fake_jdk
-
-          # The real test: activate through the WRAPPER FUNCTION,
-          # which parses sk's own --shell-format=json output and
-          # mutates $env.PATH/$env.JAVA_HOME directly -- confirms that
-          # mechanism genuinely works on a real nu process, not just
-          # that sk PRINTS the right JSON.
           sk use java 99.0.0-test
 
           if ("JAVA_HOME" not-in $env) or ($env.JAVA_HOME == null) {
             error make {msg: "JAVA_HOME was not set by the wrapper"}
           }
 
-          # NOT asserting JAVA_HOME == $fake_jdk directly -- same real
-          # finding as the PowerShell job: sk deliberately sets
-          # JAVA_HOME to the registered entry's own (possibly
-          # symlinked) location, not necessarily byte-identical to
-          # the original path given to `add`, relying on the OS to
-          # follow it transparently when actually used. What actually
-          # matters is that java is genuinely reachable through it.
+          # Not asserting JAVA_HOME == $fake_jdk: sk sets it to the
+          # registered (possibly symlinked) path; only reachability matters.
           let java_binary = ($env.JAVA_HOME | path join "bin" "java")
           if not ($java_binary | path exists) {
             error make {msg: $"java is NOT reachable through JAVA_HOME \(($env.JAVA_HOME)\)"}
@@ -210,48 +125,13 @@ jobs:
           }
           print "OK: PATH correctly updated via the real Nushell wrapper"
 
-          # Deactivation through the wrapper too -- including "null"
-          # specifically, a real, live-caught bug: Nushell's own
-          # parser converts a bare, unquoted `null` word into its OWN
-          # `nothing` type at PARSE TIME, not the literal string
-          # "null" this wrapper's [...args] rest capture expects --
-          # sk use java null previously crashed outright with "can't
-          # convert nothing to string" through this wrapper alone
-          # (zsh and PowerShell were never affected). Fixed in
-          # init.nu.tmpl itself, not just worked around here.
           sk use java null
 
-          # A SEPARATE real bug, found immediately after fixing the
-          # one above: Nushell's hide-env silently fails to persist
-          # back to the caller whenever ANY other $env.X = ...
-          # mutation ALSO happens in the same --env function call --
-          # confirmed directly, and NOT an ordering issue (reproduced
-          # even with hide-env called strictly last). This wrapper
-          # mutates $env.PATH in the very same call, so hide-env
-          # silently did nothing in exactly this real scenario. Fixed
-          # in init.nu.tmpl by using a null-valued load-env instead --
-          # confirmed correct here against a REAL external process
-          # (^env), not just Nushell's own internal $env record, since
-          # a null-valued key still technically shows as "present"
-          # internally even though external processes correctly never
-          # see it at all.
           if ("JAVA_HOME" in $env) and ($env.JAVA_HOME != null) {
             error make {msg: $"JAVA_HOME should be cleared after 'sk use java null', but is \(($env.JAVA_HOME)\)"}
           }
-          # Checked for the SPECIFIC fake JDK path, NOT bare presence
-          # of "JAVA_HOME" in `env`'s output -- a real, confirmed
-          # false-positive found only by an actual CI run: GitHub's
-          # own ubuntu-latest runners come with their own, genuine,
-          # PRE-EXISTING "JAVA_HOME" pointing at a real, bundled JDK
-          # (confirmed directly -- this sandbox's own environment has
-          # exactly the same thing), same as a real developer's own
-          # machine might. A blanket "is JAVA_HOME visible at all"
-          # check was always going to be wrong on any real machine
-          # with its own system Java -- what actually matters, and is
-          # what every other real-machine check in this project's own
-          # test suite already does correctly, is confirming the
-          # SPECIFIC entry sk activated is gone, not that the name
-          # "JAVA_HOME" never appears in `env`'s output at all.
+          # Check for the specific fake JDK path, not bare JAVA_HOME presence:
+          # ubuntu-latest runners ship their own real JAVA_HOME.
           let ext = (^env | grep "JDK-99.0.0-test" | complete)
           if $ext.exit_code == 0 {
             error make {msg: "the activated JDK's path is still visible in JAVA_HOME to a real external process after clearing"}
@@ -262,18 +142,6 @@ jobs:
           }
           print "OK: JAVA_HOME and PATH correctly cleared via the real Nushell wrapper (confirmed against a real external process too)"
 
-      # A real, PRE-EXISTING gap this project's own testing had never
-      # caught: Nushell's parser rejects ANY --flag/--flag=value token
-      # passed to a custom command that doesn't declare it, at PARSE
-      # TIME, before the wrapper's own function body ever runs --
-      # confirmed directly against a real nu 0.101 process, and
-      # confirmed to predate --format's own introduction entirely (the
-      # ORIGINAL, unmodified wrapper rejected --format=json outright,
-      # regardless of position). Fixed by declaring --format
-      # explicitly in init.nu.tmpl's own signature -- this step is the
-      # one true end-to-end confirmation that fix actually works on a
-      # real nu process, in both flag positions, not just that the
-      # generated script parses.
       - name: "Real Nushell wrapper: --format=json is never eval'd, in either flag position"
         shell: nu {0}
         run: |
@@ -285,8 +153,6 @@ jobs:
           touch ($fake_jdk | path join "bin" "java")
           sk add java 88.0.0-format-test $fake_jdk
 
-          # Flag BEFORE the subcommand -- was already safe under the
-          # ORIGINAL dispatch too, kept here as a baseline.
           let before = (sk --format=json use java 88.0.0-format-test | complete)
           if $before.exit_code != 0 {
             error make {msg: $"expected exit 0 for the --format BEFORE case, got: ($before.stdout)($before.stderr)"}
@@ -296,9 +162,6 @@ jobs:
             error make {msg: $"expected action=activated, got: ($before.stdout)"}
           }
 
-          # Flag AFTER the subcommand -- the specific case that used
-          # to be rejected outright by Nushell's own parser before
-          # --format was declared explicitly.
           let after = (sk use --format=json java 88.0.0-format-test | complete)
           if $after.exit_code != 0 {
             error make {msg: $"expected exit 0 for the --format AFTER case, got: ($after.stdout)($after.stderr)"}
@@ -312,11 +175,6 @@ jobs:
           }
           print "OK: --format=json passes through untouched, in both flag positions, on a real Nushell process"
 
-  # Real PowerShell wrapper activation -- the single highest-risk,
-  # never-verified-on-real-Windows piece of the whole implementation
-  # (Invoke-Expression actually applying $env: lines to a live
-  # session). Everything else above is compile/unit-level; this is
-  # the one true end-to-end check.
   windows-powershell-wrapper:
     runs-on: windows-latest
     steps:
@@ -332,30 +190,13 @@ jobs:
       - name: "Real PowerShell wrapper: activate and deactivate"
         shell: pwsh
         run: |
-          # A real, confirmed CI-script bug (not a bug in sk itself):
-          # every wrapper function -- zsh's, nu's, and PowerShell's
-          # alike -- calls the real binary by NAME only, deliberately
-          # never a hardcoded path (see init.ps1.tmpl's own comment),
-          # so moving/upgrading the binary later never requires
-          # touching shell config again. That means the real binary
-          # must ALREADY be resolvable via a plain PATH lookup for
-          # ANY of this to work -- true for a real user's own,
-          # already-configured PATH, but NOT true by default in a
-          # fresh CI runner, where the just-built sk.exe sits only in
-          # the checkout directory. Added explicitly here, matching
-          # exactly what a real user's own PATH setup already
-          # provides implicitly.
+          # Wrapper functions call `sk` by name, so it must be on PATH
+          # (true by default on a real user's machine, not on a fresh runner).
           $env:PATH = "$PWD;$env:PATH"
 
-          # Load the REAL, generated wrapper -- not a hand-written
-          # stand-in -- exactly what a user's own $PROFILE would run.
           sk.exe init powershell | Out-File -FilePath wrapper.ps1 -Encoding utf8
           . .\wrapper.ps1
 
-          # A fake JDK is enough here: this test is about whether the
-          # WRAPPER correctly applies sk's output to the live session,
-          # not about a real download/install (already covered by
-          # installer's own tests).
           $fakeJdk = Join-Path $PWD "fake-jdk"
           New-Item -ItemType Directory -Force -Path (Join-Path $fakeJdk "bin") | Out-Null
           New-Item -ItemType File -Force -Path (Join-Path $fakeJdk "bin\java.exe") | Out-Null
@@ -363,31 +204,13 @@ jobs:
           sk.exe add java 99.0.0-test $fakeJdk
           if ($LASTEXITCODE -ne 0) { throw "sk add failed" }
 
-          # The real test: activate through the WRAPPER FUNCTION,
-          # which pipes sk's PowerShell-format output through
-          # Invoke-Expression -- confirms that mechanism genuinely
-          # mutates the live session's $env:, not just that sk PRINTS
-          # the right text (already covered by output_test.go).
           sk use java 99.0.0-test
 
           if (-not $env:JAVA_HOME) {
             throw "JAVA_HOME was not set by the wrapper"
           }
-          # NOT asserting JAVA_HOME -eq $fakeJdk directly -- a real
-          # finding from a real Windows CI run, caught by exactly
-          # this test doing its job: `sk`'s own, established, long-
-          # standing design deliberately sets JAVA_HOME to the
-          # SYMLINK's own path for an add-registered entry, not its
-          # resolved target (see inventory.Version.Path's own doc
-          # comment) -- relying on the OS to follow it transparently
-          # whenever the path is actually USED, exactly as Unix does.
-          # The first version of this test asserted the wrong thing
-          # (the resolved path), contradicting that established
-          # design rather than finding a real bug in it. What
-          # actually matters -- and IS the genuine, Windows-specific
-          # thing worth verifying here -- is that the symlink
-          # transparently resolves for real FILE ACCESS on Windows
-          # too, the same way it already does on Unix.
+          # Not asserting the resolved path: sk deliberately sets JAVA_HOME
+          # to the symlink itself; only reachability matters.
           $javaBinary = Join-Path $env:JAVA_HOME "bin\java.exe"
           if (-not (Test-Path $javaBinary)) {
             throw "java.exe is NOT reachable through JAVA_HOME ('$env:JAVA_HOME') -- the symlink did not transparently resolve on Windows"
@@ -399,7 +222,6 @@ jobs:
           }
           Write-Host "OK: PATH correctly updated via the real PowerShell wrapper"
 
-          # Deactivation through the wrapper too.
           sk use java null
 
           if ($env:JAVA_HOME) {
@@ -410,17 +232,6 @@ jobs:
           }
           Write-Host "OK: JAVA_HOME and PATH correctly cleared via the real PowerShell wrapper"
 
-      # A real, found gap, confirmed directly against a real pwsh 7.4
-      # process: the Invoke-Expression dispatch used to key off
-      # $args[0] alone, so `sk use --format=json java 21...` (flag
-      # AFTER the subcommand) reached Invoke-Expression with sk's own
-      # raw JSON object as its input, failing outright with a real
-      # PowerShell parse error ("Unexpected token ... in expression or
-      # statement"). Fixed by scanning $args for --format anywhere in
-      # init.ps1.tmpl -- this step is the one true end-to-end
-      # confirmation that fix actually works on a real pwsh process,
-      # in both flag positions, not just that the generated script
-      # parses.
       - name: "Real PowerShell wrapper: --format=json is never eval'd, in either flag position"
         shell: pwsh
         run: |
@@ -434,16 +245,11 @@ jobs:
           sk.exe add java 88.0.0-format-test $fakeJdk
           if ($LASTEXITCODE -ne 0) { throw "sk add failed" }
 
-          # Flag BEFORE the subcommand -- was already safe under the
-          # ORIGINAL dispatch too, kept here as a baseline.
           $before = sk --format=json use java 88.0.0-format-test
           if ($LASTEXITCODE -ne 0) { throw "expected exit 0 for the --format BEFORE case, got: $before" }
           $beforeJson = $before | ConvertFrom-Json
           if ($beforeJson.data.action -ne "activated") { throw "expected action=activated, got: $before" }
 
-          # Flag AFTER the subcommand -- the specific case that used
-          # to fail with a real Invoke-Expression parse error before
-          # this fix.
           $after = sk use --format=json java 88.0.0-format-test
           if ($LASTEXITCODE -ne 0) { throw "expected exit 0 for the --format AFTER case, got: $after" }
           $afterJson = $after | ConvertFrom-Json
