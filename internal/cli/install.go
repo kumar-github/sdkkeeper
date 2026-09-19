@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,16 @@ func newInstallCmd() *cobra.Command {
 			arg := ""
 			if len(args) == 2 {
 				arg = args[1]
+			}
+
+			// --format=json is a separate, non-interactive path,
+			// exactly like use/remove/add -- no session.Out, no
+			// progress rendering (there's no terminal to redraw a
+			// bar on, and no JSON shape for an in-flight
+			// percentage), just the final envelope.
+			if outputFormat == FormatJSON {
+				data, jerr := resolveInstallJSON(cmd.Context(), toolName, arg)
+				return emitJSON(data, jerr)
 			}
 
 			tool, err := requireTool(toolName)
@@ -224,5 +235,113 @@ func newInstallCmd() *cobra.Command {
 			))
 			return nil
 		},
+	}
+}
+
+// installPayload is install's --format=json success shape: the
+// shared {tool, version, vendor, action} fields plus Path (the final
+// install directory) and Bytes (the downloaded archive size), so a
+// caller can confirm what actually landed without a second `sk list`
+// call.
+type installPayload struct {
+	Tool    string  `json:"tool"`
+	Version string  `json:"version"`
+	Vendor  *string `json:"vendor"`
+	Action  string  `json:"action"`
+	Path    string  `json:"path"`
+	Bytes   int64   `json:"bytes"`
+}
+
+// resolveInstallJSON is install's --format=json counterpart: no
+// session.Out, no picker, no progress rendering -- otherwise mirrors
+// the interactive RunE's own resolve -> already-exists check ->
+// download -> extract -> place sequence exactly.
+func resolveInstallJSON(ctx context.Context, toolName, arg string) (*installPayload, *jsonError) {
+	tool, ok := tooldef.Get(toolName)
+	if !ok {
+		return nil, &jsonError{Code: ErrCodeAmbiguousTool, Message: fmt.Sprintf("unknown tool: %s", toolName)}
+	}
+
+	if len(vendorNamesFor(tool.Name)) == 0 {
+		return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("install is not yet supported for %s -- currently supported: %s", tool.DisplayName, strings.Join(installSupportedTools(), ", "))}
+	}
+
+	provider, version, jerr := classifyInstallArg(tool, arg)
+	if jerr != nil {
+		return nil, jerr
+	}
+
+	versionLabel := version
+	if !hasSingleVendor(tool.Name) {
+		versionLabel = version + "-" + provider.Name()
+	}
+	targetDir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+versionLabel)
+
+	// Checked before any network activity, same as the interactive
+	// path -- installer.Install repeats this check right before
+	// writing as the authoritative, race-safe guard.
+	if _, err := os.Lstat(targetDir); err == nil {
+		return nil, &jsonError{Code: ErrCodeAlreadyInstalled, Message: alreadyExistsMessage(tool.FolderPrefix, versionLabel, targetDir)}
+	}
+
+	asset, err := provider.ResolveAsset(ctx, version, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		if err == registry.ErrVersionNotFound {
+			return nil, &jsonError{Code: ErrCodeNotFound, Message: fmt.Sprintf("%s %s not found for %s/%s via %s", tool.DisplayName, version, runtime.GOOS, runtime.GOARCH, provider.Name())}
+		}
+		return nil, &jsonError{Code: ErrCodeInternalError, Message: fmt.Sprintf("could not resolve %s %s: %s", tool.DisplayName, version, err)}
+	}
+
+	var downloadedBytes int64
+	err = installer.Install(ctx, installer.Options{
+		URL:               asset.URL,
+		Filename:          asset.Filename,
+		Checksum:          asset.Checksum,
+		ChecksumAlgorithm: asset.ChecksumAlgorithm,
+		TargetDir:         targetDir,
+		TempRoot:          tooldef.TempRoot(),
+		DownloadProgress: func(read, total int64, final bool) {
+			if final {
+				downloadedBytes = read
+			}
+		},
+	})
+	if err != nil {
+		return nil, classifyInstallErr(tool, versionLabel, targetDir, err)
+	}
+
+	return &installPayload{
+		Tool:    tool.Name,
+		Version: version,
+		Vendor:  vendorPtr(tool.Name, provider.Name()),
+		Action:  string(actionInstalled),
+		Path:    targetDir,
+		Bytes:   downloadedBytes,
+	}, nil
+}
+
+// classifyInstallErr maps installer.Install's error into the right
+// error.code. installer has no typed sentinel for a download failure
+// or a checksum mismatch (both are plain fmt.Errorf-wrapped text --
+// see installer.go), so this checks for their known, stable message
+// substrings -- narrow and deliberate, the same pragmatic approach
+// root.go's printUnreportedError already takes for classifying
+// cobra's own untyped errors.
+func classifyInstallErr(tool tooldef.Tool, versionLabel, targetDir string, err error) *jsonError {
+	if err == installer.ErrAlreadyExists {
+		return &jsonError{Code: ErrCodeAlreadyInstalled, Message: alreadyExistsMessage(tool.FolderPrefix, versionLabel, targetDir)}
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "checksum mismatch"):
+		return &jsonError{Code: ErrCodeChecksumMismatch, Message: msg}
+	case strings.Contains(msg, "download failed after"), strings.Contains(msg, "request failed"):
+		return &jsonError{Code: ErrCodeDownloadFailed, Message: msg}
+	default:
+		// Covers extraction and placement failures -- the target
+		// was resolved and a real state-changing operation on it
+		// failed, matching ErrCodeActivationFailed's own convention
+		// (see its doc comment in jsonformat.go).
+		return &jsonError{Code: ErrCodeActivationFailed, Message: fmt.Sprintf("install failed: %s", msg)}
 	}
 }

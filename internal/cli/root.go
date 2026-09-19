@@ -69,12 +69,13 @@ var styles term.Styles
 // normally before exiting, rather than an os.Exit deep in a command's
 // RunE skipping cleanup further up the stack.
 //
-// version is passed through from main.go rather than read directly by
-// this package, so cli stays the only package that knows about cobra
-// while main.go stays the only package that knows how the version
-// string itself gets set (build-time ldflags injection). No longer
-// wired to cobra's own Version field -- see newVersionCmd for why.
-func Execute(version string) error {
+// version and commit are passed through from main.go rather than read
+// directly by this package, so cli stays the only package that knows
+// about cobra while main.go stays the only package that knows how
+// those strings themselves get set (build-time ldflags injection). No
+// longer wired to cobra's own Version field -- see newVersionCmd for
+// why.
+func Execute(version, commit string) error {
 	root := &cobra.Command{
 		Use:           "sk",
 		Short:         "SDK Keeper — explicit, no-default SDK version switching",
@@ -111,7 +112,7 @@ func Execute(version string) error {
 	root.AddCommand(newCurrentCmd())
 	root.AddCommand(newVendorsCmd())
 	root.AddCommand(newDoctorCmd())
-	root.AddCommand(newVersionCmd(version))
+	root.AddCommand(newVersionCmd(version, commit))
 
 	err := root.Execute()
 	printUnreportedError(err)

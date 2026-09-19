@@ -43,6 +43,50 @@ func parseFullIdentifier(toolName, arg string) (version, vendor string, ok bool)
 	return "", "", false
 }
 
+// classifyInstallArg resolves arg into a provider+version for
+// install's --format=json path, or a *jsonError distinguishing "no
+// version given at all" (ErrCodeVersionRequired) from "a version was
+// given but the vendor is still ambiguous for a multi-vendor tool"
+// (ErrCodeVendorRequired). --format=json can show neither the
+// vendor-picker nor the version-picker resolveVendorAndVersion drives
+// interactively, so both incomplete-input shapes need their own
+// distinct, non-interactive error instead of one catch-all.
+func classifyInstallArg(tool tooldef.Tool, arg string) (registry.Provider, string, *jsonError) {
+	if v, vendorName, ok := parseFullIdentifier(tool.Name, arg); ok {
+		return providersFor(tool.Name)[vendorName], v, nil
+	}
+
+	if arg == "" {
+		return nil, "", &jsonError{Code: ErrCodeVersionRequired, Message: fmt.Sprintf("a version is required to install %s in --format=json (the interactive picker cannot be shown)", tool.DisplayName)}
+	}
+
+	if hasSingleVendor(tool.Name) {
+		// parseFullIdentifier already accepts any bare "x.y[.z]"
+		// version for a single-vendor tool -- arriving here means
+		// arg didn't look like a complete version at all (e.g. a
+		// bare major with no dot).
+		return nil, "", &jsonError{Code: ErrCodeVersionRequired, Message: fmt.Sprintf("%q is not a complete %s version -- an exact version is required in --format=json", arg, tool.DisplayName)}
+	}
+
+	names := vendorNamesFor(tool.Name)
+	for _, name := range names {
+		if strings.EqualFold(arg, name) {
+			// A bare vendor name with no version -- the version is
+			// what's missing here, not the vendor.
+			return nil, "", &jsonError{Code: ErrCodeVersionRequired, Message: fmt.Sprintf("a version is required to install %s (%s) in --format=json", tool.DisplayName, name)}
+		}
+	}
+
+	if strings.Contains(arg, ".") {
+		// Looks like a version, but with no vendor suffix matching
+		// any of this tool's known vendors -- the vendor is what's
+		// missing/ambiguous here, not the version.
+		return nil, "", &jsonError{Code: ErrCodeVendorRequired, Message: fmt.Sprintf("%s has multiple vendors (%s) -- specify one explicitly, e.g. %q, in --format=json", tool.DisplayName, strings.Join(names, ", "), arg+"-"+names[0])}
+	}
+
+	return nil, "", &jsonError{Code: ErrCodeVersionRequired, Message: fmt.Sprintf("%q is not a complete %s version+vendor identifier -- an exact identifier (e.g. %q) is required in --format=json", arg, tool.DisplayName, "21.0.2-"+names[0])}
+}
+
 // resolveVendorAndVersion runs the fixed vendor -> major -> patch
 // picker sequence. Vendor is asked first, always, since major/patch
 // lists are fetched from that specific vendor's API. Skipped entirely

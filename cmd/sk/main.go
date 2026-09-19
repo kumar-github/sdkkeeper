@@ -24,8 +24,14 @@ import (
 // terraform all identify an unreleased, locally-built binary.
 var version = "dev"
 
+// commit is injected at build time via -ldflags "-X main.commit=<sha>",
+// alongside version -- see version's own doc comment. Empty for a
+// local "dev" build, same as version has no real git-tag meaning
+// then either.
+var commit = ""
+
 func main() {
-	err := cli.Execute(version)
+	err := cli.Execute(version, commit)
 	// nil -> 0, a *cli.CLIError -> its own exit code (--format=json's
 	// error-code table), anything else -> 1, unchanged from before
 	// that table existed.
