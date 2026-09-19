@@ -921,6 +921,20 @@ PATH="${PATH//$json_removed_bin_path:/}"
 assert_true "$([[ -z "${JAVA_HOME:-}" ]] && echo true || echo false)" "JAVA_HOME correctly cleared by a caller acting on wasCurrent+envVar alone"
 assert_true "$([[ "$PATH" != *"$json_removed_bin_path"* ]] && echo true || echo false)" "the removed JDK's bin directory is correctly gone from PATH"
 
+step "remove --format=json prints a plain-text hint on STDERR (never stdout) when wasCurrent is true -- a real, reported gap: seeing wasCurrent:true in the JSON alone still didn't tell a human what to actually type"
+fake_jdk "$CANDIDATES/JDK-9-temurin" "9-temurin"
+export JAVA_HOME="$CANDIDATES/JDK-9-temurin"
+hint_stdout=$(mktemp)
+hint_stderr=$(mktemp)
+"$SK_BIN" --format=json remove java 9-temurin > "$hint_stdout" 2> "$hint_stderr"
+print "  stdout: $(cat "$hint_stdout")"
+print "  stderr: $(cat "$hint_stderr")"
+assert_not_contains "$(cat "$hint_stdout")" "note:" "the hint never appears on stdout -- a script/agent parsing the JSON sees it unchanged"
+assert_contains "$(cat "$hint_stdout")" '"wasCurrent":true' "the JSON envelope itself is untouched by the hint"
+assert_contains "$(cat "$hint_stderr")" "unset JAVA_HOME" "stderr names the exact command to run"
+rm -f "$hint_stdout" "$hint_stderr"
+unset JAVA_HOME
+
 step "remove --format=json reports wasCurrent/wasDefault false when neither applies -- not a hardcoded true"
 fake_jdk "$CANDIDATES/JDK-11-temurin" "11-temurin"
 fake_jdk "$CANDIDATES/JDK-8-temurin" "8-temurin"

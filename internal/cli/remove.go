@@ -40,7 +40,22 @@ func newRemoveCmd() *cobra.Command {
 
 			if outputFormat == FormatJSON {
 				data, jerr := resolveRemoveJSON(toolName, version)
-				return emitJSON(data, jerr)
+				err := emitJSON(data, jerr)
+				// A plain-text nudge on stderr, never stdout -- the
+				// JSON envelope on stdout is untouched by this, so a
+				// script/agent parsing it sees exactly the same
+				// output either way. This exists because --format=json
+				// genuinely cannot clear JAVA_HOME in the CALLING
+				// shell (no subprocess can mutate its parent's
+				// environment), so wasCurrent=true on its own is easy
+				// to see and still not act on -- this spells out the
+				// exact command to run, for a human testing this
+				// interactively rather than a script that already
+				// knows to check wasCurrent itself.
+				if jerr == nil && data.WasCurrent {
+					fmt.Fprintf(os.Stderr, "note: %s was active in this shell -- run `unset %s` to clear it (this process can't modify your shell's environment)\n", data.EnvVar, data.EnvVar)
+				}
+				return err
 			}
 
 			tool, err := requireTool(toolName)
