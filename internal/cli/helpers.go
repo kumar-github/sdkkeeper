@@ -93,8 +93,13 @@ func indentLines(s, indent string) string {
 	return b.String()
 }
 
-// renderTable renders rows as an aligned, borderless table, shared by
-// list.go and search.go. styleFunc may be nil; rows[i][j] must be
+// renderTable renders rows as an aligned, borderless table. Has no
+// current production caller -- list.go's own version rows use plain
+// fixed-width padding instead (see printVersions' own doc comment for
+// why), and search.go moved to the bordered renderBorderedTable
+// below. Kept, with its own direct tests in helpers_test.go, as a
+// reasonable building block for a future borderless table need;
+// remove if it stays unused for long. styleFunc may be nil; rows[i][j] must be
 // plain text, never pre-styled/ANSI-colored -- lipgloss/table
 // miscalculates column widths otherwise. Its StyleFunc row index is
 // offset by 1 from the data (row 0 is always an internal header row),
@@ -151,6 +156,46 @@ func renderTable(rows [][]string, numCols int, width int, styleFunc func(row, co
 	for _, r := range rows {
 		t.Row(r...)
 	}
+	return t.String()
+}
+
+// renderBorderedTable renders headers+rows as a real, bordered
+// table -- deliberately NOT renderTable above, which is borderless
+// by design. Shared by tools.go (`sk tools`) and search.go (`sk
+// search`), both of which are always a single, self-contained
+// render per call (every row known upfront, nothing split across
+// multiple calls that need to visually line up with each other the
+// way list.go's per-vendor groups do -- see printVersions' own doc
+// comment on why THAT case needs plain padding instead), so neither
+// has renderTable's original reason for staying borderless.
+//
+// Uses table.Headers()/table.HeaderRow, NOT the row-0-header-row
+// trick renderTable uses internally -- that trick exists only
+// because renderTable disables BorderTop/BorderBottom/BorderHeader
+// together, which silently drops the table's last data row in this
+// pinned lipgloss/table version. With a real border enabled here
+// (the library's own default, standard, documented configuration --
+// see table.New()), that bug doesn't apply. RoundedBorder() is also
+// table.New()'s own out-of-the-box default border style -- chosen
+// deliberately over Double (already claimed by styles.Box, the
+// picker's own frame) so this reads as its own distinct element
+// rather than echoing it.
+//
+// rows must be plain text, never pre-styled/ANSI-colored -- same
+// constraint as renderTable, for the same reason: baked-in ANSI
+// breaks lipgloss/table's own width calculation.
+func renderBorderedTable(headers []string, rows [][]string, headerStyle lipgloss.Style) string {
+	cellStyle := lipgloss.NewStyle().Padding(0, 1)
+	t := table.New().
+		Border(lipgloss.RoundedBorder()).
+		Headers(headers...).
+		Rows(rows...).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			if row == table.HeaderRow {
+				return headerStyle.Padding(0, 1)
+			}
+			return cellStyle
+		})
 	return t.String()
 }
 

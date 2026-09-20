@@ -111,6 +111,7 @@ func Execute(version, commit string) error {
 	root.AddCommand(newSearchCmd())
 	root.AddCommand(newCurrentCmd())
 	root.AddCommand(newVendorsCmd())
+	root.AddCommand(newToolsCmd())
 	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newVersionCmd(version, commit))
 
