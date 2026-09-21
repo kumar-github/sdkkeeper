@@ -25,13 +25,25 @@ func removeVersion(v inventory.Version) error {
 
 func newRemoveCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <tool> [version]",
-		Short: "Remove an installed or registered version",
+		Use:   "remove <tool|skrc> [version]",
+		Short: "Remove an installed or registered version, or delete $HOME/.skrc",
 		Example: `  sk remove java 21.0.2-temurin   # exact version, no picker
-  sk remove java                    # picker, matching 'use'`,
+  sk remove java                    # picker, matching 'use'
+  sk remove skrc                    # delete $HOME/.skrc (see 'sk init skrc')`,
 		Args: requireArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
+
+			// "skrc" isn't a tool -- special-cased before requireTool
+			// (which would otherwise report it as unknown) and before
+			// the version-arg logic below, which doesn't apply here.
+			if toolName == "skrc" {
+				if outputFormat == FormatJSON {
+					data, jerr := buildRemoveSkrcJSON()
+					return emitJSON(data, jerr)
+				}
+				return runRemoveSkrc()
+			}
 
 			version := ""
 			if len(args) == 2 {

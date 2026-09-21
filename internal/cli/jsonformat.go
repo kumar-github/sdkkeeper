@@ -114,24 +114,52 @@ const (
 	// would otherwise be shown (install, and use/remove for a
 	// vendor-ambiguous identifier).
 	ErrCodeVendorRequired ErrorCode = "vendor_required"
+	// ErrCodeNotImplemented (exit 110): the requested operation has
+	// no --format=json shape yet, even though its interactive
+	// counterpart works. Nothing currently uses this -- every
+	// command that once did (use with no args, init skrc, remove
+	// skrc, bare skrc) now has a real schema -- but it's kept as a
+	// legitimate, general-purpose stopgap for any future command
+	// built interactive-first.
+	ErrCodeNotImplemented ErrorCode = "not_implemented"
+	// ErrCodeSkrcNotFound (exit 111): a command that requires an
+	// existing .skrc to act on (currently just `sk use` with no
+	// arguments) found none between cwd and $HOME.
+	ErrCodeSkrcNotFound ErrorCode = "skrc_not_found"
+	// ErrCodeSkrcAlreadyExists (exit 106): `sk init skrc` found an
+	// existing $HOME/.skrc and refused to overwrite it. Shares its
+	// exit code with ErrCodeAlreadyRegistered/ErrCodeAlreadyInstalled
+	// -- same "this slot is already taken" shape, distinct string.
+	ErrCodeSkrcAlreadyExists ErrorCode = "skrc_already_exists"
+	// ErrCodeSkrcBatchPartialFailure (exit 112): `sk use` with no
+	// arguments applied a .skrc, but one or more of its candidates
+	// failed to activate. Paired with a SUCCESS envelope (status
+	// "ok", full per-candidate results and summary) -- same principle
+	// as ErrCodeDoctorCheckFailed: a partial finding within an
+	// otherwise-completed run is not an invocation error.
+	ErrCodeSkrcBatchPartialFailure ErrorCode = "skrc_batch_partial_failure"
 )
 
 // exitCodeTable is the complete, frozen exit-code mapping. Kept small
 // and coarse -- codes wrap at 256 -- with all real detail living in
 // error.code strings instead.
 var exitCodeTable = map[ErrorCode]int{
-	ErrCodeInternalError:     1,
-	ErrCodeVersionRequired:   101,
-	ErrCodeNotFound:          102,
-	ErrCodeActivationFailed:  103,
-	ErrCodeAmbiguousTool:     104,
-	ErrCodeInvalidPath:       105,
-	ErrCodeAlreadyRegistered: 106,
-	ErrCodeAlreadyInstalled:  106,
-	ErrCodeDownloadFailed:    107,
-	ErrCodeChecksumMismatch:  108,
-	ErrCodeVendorRequired:    109,
-	ErrCodeDoctorCheckFailed: 201,
+	ErrCodeInternalError:           1,
+	ErrCodeVersionRequired:         101,
+	ErrCodeNotFound:                102,
+	ErrCodeActivationFailed:        103,
+	ErrCodeAmbiguousTool:           104,
+	ErrCodeInvalidPath:             105,
+	ErrCodeAlreadyRegistered:       106,
+	ErrCodeAlreadyInstalled:        106,
+	ErrCodeDownloadFailed:          107,
+	ErrCodeChecksumMismatch:        108,
+	ErrCodeVendorRequired:          109,
+	ErrCodeNotImplemented:          110,
+	ErrCodeSkrcNotFound:            111,
+	ErrCodeSkrcAlreadyExists:       106,
+	ErrCodeSkrcBatchPartialFailure: 112,
+	ErrCodeDoctorCheckFailed:       201,
 }
 
 func exitCodeFor(code ErrorCode) int {

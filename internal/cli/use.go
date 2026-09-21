@@ -13,10 +13,28 @@ import (
 
 func newUseCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "use <tool> [version|null]",
+		Use:   "use [<tool> [version|null]]",
 		Short: "Activate a version of a tool for this shell session",
-		Args:  requireArgs(cobra.RangeArgs(1, 2)),
+		Example: `  sk use java 21.0.2-temurin   # exact version, no picker
+  sk use java                    # picker
+  sk use java null               # clear the active version
+  sk use                         # apply the nearest .skrc (see 'sk skrc', 'sk init skrc')`,
+		Args: requireArgs(cobra.RangeArgs(0, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// No tool name given -- apply the nearest .skrc instead of
+			// today's "tool name is missing" error. Entirely separate
+			// from the single-tool path below: no picker, no override
+			// warning against itself. --format=json routes to
+			// emitSkrcUseJSON (skrc_use.go) instead of runUseFromSkrc's
+			// plain-text output, which a JSON-parsing caller couldn't
+			// consume anyway.
+			if len(args) == 0 {
+				if outputFormat == FormatJSON {
+					return emitSkrcUseJSON()
+				}
+				return runUseFromSkrc()
+			}
+
 			toolName := args[0]
 			versionArg := ""
 			if len(args) == 2 {
@@ -40,6 +58,21 @@ func newUseCmd() *cobra.Command {
 			}
 
 			result, err := resolveUse(session, styles, toolName, versionArg, "")
+
+			// If a .skrc pins this tool to something else, say so --
+			// checked against what was ACTUALLY activated (handles the
+			// picker case too, where versionArg was empty going in),
+			// never against the raw argument.
+			if err == nil && result != nil && result.ActivatedVersion != "" {
+				if pinned, overridden := skrcOverride(toolName, result.ActivatedVersion); overridden {
+					tool, _ := tooldef.Get(toolName)
+					fmt.Fprintln(session.Out)
+					fmt.Fprintln(session.Out, styles.Warning.Render(fmt.Sprintf(
+						"\u26a0 Overriding project %s %s with %s for this shell",
+						tool.DisplayName, pinned, result.ActivatedVersion,
+					)))
+				}
+			}
 
 			// Always write whatever WAS resolved, even on failure --
 			// preserves a real prior success (e.g. a JDK genuinely

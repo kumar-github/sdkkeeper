@@ -177,6 +177,45 @@ func setTestHome(t *testing.T, home string) {
 	t.Setenv("USERPROFILE", home)
 }
 
+// chdir changes the working directory to dir for the duration of the
+// test, restoring the original afterward -- same os.Chdir/defer shape
+// add_test.go already uses, factored out here since the new .skrc
+// tests (skrc_test.go, skrc_use_test.go, skrc_show_test.go) all need
+// it repeatedly, to exercise findSkrc's real walk-up behavior against
+// real directories rather than passing a start path around by hand.
+func chdir(t *testing.T, dir string) {
+	t.Helper()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("could not get working directory: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("could not chdir to %q: %v", dir, err)
+	}
+	t.Cleanup(func() { os.Chdir(oldWd) })
+}
+
+// realpath resolves symlinks in path, for tests that compare an
+// expected path (built by hand from t.TempDir()'s result) against one
+// returned by product code that itself called os.Getwd() after a real
+// os.Chdir(). On macOS, t.TempDir() lives under /var/folders/..., a
+// symlink to /private/var/folders/...; a real os.Getwd() call
+// resolves that symlink (POSIX getcwd() returns the physical path),
+// but a path built by plain filepath.Join on the ORIGINAL, unresolved
+// t.TempDir() string never does -- so the two differ even though they
+// name the same directory. Apply this once, right after t.TempDir(),
+// to whichever path variable will later be compared that way; it's a
+// no-op on platforms (like Linux, this sandbox included) with no such
+// symlink to resolve.
+func realpath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("could not resolve symlinks for %q: %v", path, err)
+	}
+	return resolved
+}
+
 // installFakeJava and installFakeMaven build the minimal, real
 // on-disk directory shape inventory.Scan/tooldef.Tool expect for a
 // genuinely "installed" version -- shared fixtures for the new
@@ -207,6 +246,23 @@ func installFakeMaven(t *testing.T, home, number string) {
 	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+number)
 	if err := os.MkdirAll(tool.BinPath(dir), 0o755); err != nil {
 		t.Fatalf("installFakeMaven setup failed: %v", err)
+	}
+}
+
+// installFakeGradle mirrors installFakeJava/installFakeMaven -- shared
+// fixture for skrc_use_test.go/skrc_init_test.go/skrc_show_test.go,
+// which need a genuinely multi-tool .skrc (java+maven+gradle) to
+// exercise ordering and per-entry status against real, scannable
+// installs.
+func installFakeGradle(t *testing.T, home, number string) {
+	t.Helper()
+	tool, ok := tooldef.Get("gradle")
+	if !ok {
+		t.Fatalf("tooldef.Get(gradle) failed -- test fixture assumption broken")
+	}
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+number)
+	if err := os.MkdirAll(tool.BinPath(dir), 0o755); err != nil {
+		t.Fatalf("installFakeGradle setup failed: %v", err)
 	}
 }
 

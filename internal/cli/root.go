@@ -113,6 +113,7 @@ func Execute(version, commit string) error {
 	root.AddCommand(newVendorsCmd())
 	root.AddCommand(newToolsCmd())
 	root.AddCommand(newDoctorCmd())
+	root.AddCommand(newSkrcCmd())
 	root.AddCommand(newVersionCmd(version, commit))
 
 	err := root.Execute()
