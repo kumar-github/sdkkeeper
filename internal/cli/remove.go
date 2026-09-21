@@ -26,10 +26,10 @@ func removeVersion(v inventory.Version) error {
 func newRemoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove <tool|skrc> [version]",
-		Short: "Remove an installed or registered version, or delete $HOME/.skrc",
+		Short: "Remove an installed or registered version, or delete the nearest .skrc",
 		Example: `  sk remove java 21.0.2-temurin   # exact version, no picker
   sk remove java                    # picker, matching 'use'
-  sk remove skrc                    # delete $HOME/.skrc (see 'sk init skrc')`,
+  sk remove skrc                    # delete the nearest .skrc, walking up like 'sk use' (see 'sk init skrc')`,
 		Args: requireArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]

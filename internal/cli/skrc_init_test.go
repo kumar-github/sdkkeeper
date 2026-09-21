@@ -13,6 +13,7 @@ import (
 func TestRunInitSkrc_NothingActiveWritesCommentOnlyFile(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	os.Unsetenv("JAVA_HOME")
 	os.Unsetenv("MAVEN_HOME")
 	os.Unsetenv("GRADLE_HOME")
@@ -30,7 +31,7 @@ func TestRunInitSkrc_NothingActiveWritesCommentOnlyFile(t *testing.T) {
 
 	content, err := os.ReadFile(filepath.Join(home, ".skrc"))
 	if err != nil {
-		t.Fatalf("expected $HOME/.skrc to exist: %v", err)
+		t.Fatalf("expected .skrc to exist in cwd: %v", err)
 	}
 	if !strings.HasPrefix(string(content), "#") {
 		t.Errorf("expected a comment-only placeholder, got: %q", content)
@@ -44,9 +45,39 @@ func TestRunInitSkrc_NothingActiveWritesCommentOnlyFile(t *testing.T) {
 	}
 }
 
+// TestRunInitSkrc_CreatesInCwdNotHome is the regression test for the
+// exact bug report this design is built around: running 'sk init
+// skrc' from a project directory must create the file THERE, not
+// silently divert to $HOME even though $HOME is a different,
+// unrelated directory.
+func TestRunInitSkrc_CreatesInCwdNotHome(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	chdir(t, proj)
+
+	var runErr error
+	withSession(t, func() {
+		runErr = runInitSkrc()
+	})
+	if runErr != nil {
+		t.Fatalf("expected success, got: %v", runErr)
+	}
+	if _, err := os.Stat(filepath.Join(proj, ".skrc")); err != nil {
+		t.Errorf("expected .skrc in the PROJECT directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".skrc")); !os.IsNotExist(err) {
+		t.Error("expected $HOME/.skrc to NOT be created -- init only ever targets cwd")
+	}
+}
+
 func TestRunInitSkrc_ActiveToolsAreSnapshotted(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	installFakeJava(t, home, "21.0.2-temurin")
 	installFakeMaven(t, home, "3.9.9")
 
@@ -89,6 +120,7 @@ func TestRunInitSkrc_ActiveToolsAreSnapshotted(t *testing.T) {
 func TestRunInitSkrc_StaleEnvValueIsSilentlySkipped(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	// No real java installed at all -- JAVA_HOME points at nothing
 	// inventory.Scan will ever find.
 	t.Setenv("JAVA_HOME", filepath.Join(home, ".sdkkeeper", "candidates", "java", "JDK-does-not-exist"))
@@ -113,6 +145,7 @@ func TestRunInitSkrc_StaleEnvValueIsSilentlySkipped(t *testing.T) {
 func TestRunInitSkrc_RefusesWhenFileAlreadyExists(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	existing := filepath.Join(home, ".skrc")
 	if err := os.WriteFile(existing, []byte("java=1.0\n"), 0o644); err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -123,7 +156,7 @@ func TestRunInitSkrc_RefusesWhenFileAlreadyExists(t *testing.T) {
 		runErr = runInitSkrc()
 	})
 	if runErr == nil {
-		t.Fatal("expected an error when $HOME/.skrc already exists")
+		t.Fatal("expected an error when cwd's .skrc already exists")
 	}
 	if !strings.Contains(out, "already exists") {
 		t.Errorf("expected an already-exists message, got: %q", out)
@@ -142,6 +175,7 @@ func TestRunInitSkrc_RefusesWhenFileAlreadyExists(t *testing.T) {
 func TestRunRemoveSkrc_DeletesExistingFile(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	path := filepath.Join(home, ".skrc")
 	if err := os.WriteFile(path, []byte("java=1.0\n"), 0o644); err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -162,9 +196,43 @@ func TestRunRemoveSkrc_DeletesExistingFile(t *testing.T) {
 	}
 }
 
-func TestRunRemoveSkrc_MissingFileIsNotAnError(t *testing.T) {
+// TestRunRemoveSkrc_WalksUpFromNestedSubdirectory is remove's own
+// mirror of init's cwd regression test: removal must target
+// whichever .skrc is actually nearest to cwd (walking up, same as
+// 'sk use'/'sk skrc' discovery), not a fixed $HOME location.
+func TestRunRemoveSkrc_WalksUpFromNestedSubdirectory(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	proj := filepath.Join(home, "proj")
+	nested := filepath.Join(proj, "src", "main")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	path := filepath.Join(proj, ".skrc")
+	if err := os.WriteFile(path, []byte("java=1.0\n"), 0o644); err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	chdir(t, nested)
+
+	var runErr error
+	out := withSession(t, func() {
+		runErr = runRemoveSkrc()
+	})
+	if runErr != nil {
+		t.Fatalf("expected success, got: %v", runErr)
+	}
+	if !strings.Contains(out, path) {
+		t.Errorf("expected the confirmation to name the real project path %q, got: %q", path, out)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("expected the project's .skrc (found by walking up) to be removed")
+	}
+}
+
+func TestRunRemoveSkrc_NothingFoundAnywhereIsNotAnError(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	chdir(t, home)
 
 	var runErr error
 	out := withSession(t, func() {
@@ -173,7 +241,7 @@ func TestRunRemoveSkrc_MissingFileIsNotAnError(t *testing.T) {
 	if runErr != nil {
 		t.Fatalf("expected no error when there's nothing to remove, got: %v", runErr)
 	}
-	if !strings.Contains(out, "does not exist") {
+	if !strings.Contains(out, "No .skrc found") {
 		t.Errorf("expected a 'nothing to remove' message, got: %q", out)
 	}
 }
@@ -184,6 +252,7 @@ func TestRunRemoveSkrc_MissingFileIsNotAnError(t *testing.T) {
 func TestInitCmd_SkrcArgDispatchesToRunInitSkrc(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 
 	var runErr error
 	withSession(t, func() {
@@ -194,13 +263,14 @@ func TestInitCmd_SkrcArgDispatchesToRunInitSkrc(t *testing.T) {
 		t.Fatalf("expected success, got: %v", runErr)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".skrc")); err != nil {
-		t.Errorf("expected $HOME/.skrc to have been created via 'sk init skrc': %v", err)
+		t.Errorf("expected .skrc to have been created in cwd via 'sk init skrc': %v", err)
 	}
 }
 
 func TestInitCmd_ShellArgStillPrintsShellIntegration(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
@@ -219,7 +289,7 @@ func TestInitCmd_ShellArgStillPrintsShellIntegration(t *testing.T) {
 		t.Errorf("expected zsh shell integration output, got: %q", out)
 	}
 	if _, statErr := os.Stat(filepath.Join(home, ".skrc")); !os.IsNotExist(statErr) {
-		t.Error("expected 'sk init zsh' to never touch $HOME/.skrc")
+		t.Error("expected 'sk init zsh' to never create a .skrc")
 	}
 }
 
@@ -230,6 +300,7 @@ func TestInitCmd_ShellArgStillPrintsShellIntegration(t *testing.T) {
 func TestRemoveCmd_SkrcArgDispatchesToRunRemoveSkrc(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	path := filepath.Join(home, ".skrc")
 	if err := os.WriteFile(path, []byte("java=1.0\n"), 0o644); err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -244,13 +315,14 @@ func TestRemoveCmd_SkrcArgDispatchesToRunRemoveSkrc(t *testing.T) {
 		t.Fatalf("expected success, got: %v", runErr)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("expected $HOME/.skrc to have been removed via 'sk remove skrc'")
+		t.Error("expected the nearest .skrc to have been removed via 'sk remove skrc'")
 	}
 }
 
 func TestInitCmd_SkrcJSONCreatesRealFileAndReportsEntries(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	installFakeJava(t, home, "21.0.2-temurin")
 	javaTool, _ := tooldef.Get("java")
 	javaDir := filepath.Join(javaTool.CandidateRoot(), javaTool.FolderPrefix+"21.0.2-temurin")
@@ -282,6 +354,7 @@ func TestInitCmd_SkrcJSONCreatesRealFileAndReportsEntries(t *testing.T) {
 func TestInitCmd_SkrcJSONAlreadyExistsReturnsSkrcAlreadyExists(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	existing := filepath.Join(home, ".skrc")
 	if err := os.WriteFile(existing, []byte("java=1.0\n"), 0o644); err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -316,6 +389,7 @@ func TestInitCmd_SkrcJSONAlreadyExistsReturnsSkrcAlreadyExists(t *testing.T) {
 func TestRemoveCmd_SkrcJSONRemovesRealFile(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 	path := filepath.Join(home, ".skrc")
 	if err := os.WriteFile(path, []byte("java=1.0\n"), 0o644); err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -341,9 +415,10 @@ func TestRemoveCmd_SkrcJSONRemovesRealFile(t *testing.T) {
 	}
 }
 
-func TestRemoveCmd_SkrcJSONAlreadyGoneReportsNotPresentNotAnError(t *testing.T) {
+func TestRemoveCmd_SkrcJSONNothingFoundReportsNotFoundNotAnError(t *testing.T) {
 	home := t.TempDir()
 	setTestHome(t, home)
+	chdir(t, home)
 
 	oldFormat := outputFormat
 	outputFormat = FormatJSON
@@ -355,9 +430,12 @@ func TestRemoveCmd_SkrcJSONAlreadyGoneReportsNotPresentNotAnError(t *testing.T) 
 		runErr = cmd.RunE(cmd, []string{"skrc"})
 	})
 	if runErr != nil {
-		t.Fatalf("expected no error for an already-absent file, got: %v", runErr)
+		t.Fatalf("expected no error when nothing is found, got: %v", runErr)
 	}
-	if !strings.Contains(out, `"status":"ok"`) || !strings.Contains(out, `"action":"not_present"`) {
-		t.Errorf("expected a success envelope with action:not_present, got: %q", out)
+	if !strings.Contains(out, `"status":"ok"`) || !strings.Contains(out, `"action":"not_found"`) {
+		t.Errorf("expected a success envelope with action:not_found, got: %q", out)
+	}
+	if !strings.Contains(out, `"path":null`) {
+		t.Errorf("expected path:null, got: %q", out)
 	}
 }

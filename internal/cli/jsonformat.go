@@ -127,9 +127,11 @@ const (
 	// arguments) found none between cwd and $HOME.
 	ErrCodeSkrcNotFound ErrorCode = "skrc_not_found"
 	// ErrCodeSkrcAlreadyExists (exit 106): `sk init skrc` found an
-	// existing $HOME/.skrc and refused to overwrite it. Shares its
-	// exit code with ErrCodeAlreadyRegistered/ErrCodeAlreadyInstalled
-	// -- same "this slot is already taken" shape, distinct string.
+	// existing .skrc already at the target directory (cwd -- git-
+	// init/npm-init style, not a fixed location) and refused to
+	// overwrite it. Shares its exit code with
+	// ErrCodeAlreadyRegistered/ErrCodeAlreadyInstalled -- same "this
+	// slot is already taken" shape, distinct string.
 	ErrCodeSkrcAlreadyExists ErrorCode = "skrc_already_exists"
 	// ErrCodeSkrcBatchPartialFailure (exit 112): `sk use` with no
 	// arguments applied a .skrc, but one or more of its candidates

@@ -11,12 +11,14 @@ import (
 func newInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init <shell|skrc>",
-		Short: "Print shell integration for zsh/nu/powershell, or create $HOME/.skrc (sk init skrc)",
+		Short: "Print shell integration for zsh/nu/powershell, or create .skrc in this directory (sk init skrc)",
 		Long: `Print shell integration for zsh, nu, or powershell (pwsh is accepted as an alias for powershell) --
-or, with 'sk init skrc', create $HOME/.skrc from whatever tools are currently
-active in this shell (see 'sk remove skrc' to delete it, and 'sk use' with no
-arguments to apply a project's own .skrc). The rest of this text covers only
-the shell-integration form.
+or, with 'sk init skrc', create .skrc in the CURRENT directory from whatever
+tools are currently active in this shell (same convention as 'git init'/'npm
+init' -- run it while standing in $HOME for a personal, global fallback; run
+it in a project directory to pin that project). See 'sk remove skrc' to
+delete the nearest one, and 'sk use' with no arguments to apply it. The rest
+of this text covers only the shell-integration form.
 
   zsh:        eval "$(sk init zsh)"          # in .zshrc
   nu:         sk init nu | save -f ($nu.data-dir | path join "vendor/autoload/sk.nu")

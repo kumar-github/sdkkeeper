@@ -1043,30 +1043,37 @@ section "P. .skrc lifecycle (init skrc, remove skrc, bare skrc, use with no argu
 # script's own "never touches anything outside its throwaway HOME"
 # safety guarantee. Already covered directly by
 # TestFindSkrc_StopsAtHomeBoundary in the Go test suite.
+#
+# 'sk init skrc' acts on CWD (git-init/npm-init style), not a fixed
+# location -- unlike every other step in this script so far, this
+# section's very first command would otherwise write into wherever
+# this script was INVOKED from, not this run's throwaway TEST_HOME.
+# This cd is what keeps that safety guarantee real for this section.
+cd "$TEST_HOME"
 unset JAVA_HOME MAVEN_HOME GRADLE_HOME
 MAVEN_CANDIDATES="$TEST_HOME/.sdkkeeper/candidates/maven"
 
-step "P1. 'sk init skrc' with nothing active -- comment-only placeholder"
+step "P1. 'sk init skrc' with nothing active -- comment-only placeholder, created in cwd"
 capture_sk_direct init skrc
 print -r -- "$SK_OUT"
 assert_contains "$SK_OUT" "no tools were active" "reports the empty case in plain text"
 assert_true "$([[ -f "$TEST_HOME/.skrc" ]] && echo true || echo false)" \
-    "\$HOME/.skrc was actually created"
+    ".skrc was actually created in cwd (\$TEST_HOME, for this step)"
 assert_true "$([[ "$(cat "$TEST_HOME/.skrc")" == \#* ]] && echo true || echo false)" \
     "the empty file is a '#' comment placeholder, not zero bytes"
 
-step "P2. 'sk remove skrc' cleans it back up"
+step "P2. 'sk remove skrc' cleans it back up (walks up from cwd, finds it immediately here)"
 capture_sk_direct remove skrc
 assert_contains "$SK_OUT" "Removed" "reports the removal"
 assert_true "$([[ ! -f "$TEST_HOME/.skrc" ]] && echo true || echo false)" \
-    "\$HOME/.skrc is actually gone"
+    "the .skrc in cwd is actually gone"
 
-step "P2b. 'sk remove skrc' again -- already gone is NOT an error"
+step "P2b. 'sk remove skrc' again -- nothing found anywhere is NOT an error"
 capture_sk_direct remove skrc
-assert_exit_code "$SK_EXIT" "0" "removing an already-absent .skrc is not an error"
-assert_contains "$SK_OUT" "does not exist" "says plainly there was nothing to remove"
+assert_exit_code "$SK_EXIT" "0" "removing when nothing is found is not an error"
+assert_contains "$SK_OUT" "No .skrc found" "says plainly there was nothing to remove"
 
-step "P3. Activate java + maven for real, then 'sk init skrc' snapshots both"
+step "P3. Activate java + maven for real, then 'sk init skrc' snapshots both (into cwd)"
 fake_jdk "$CANDIDATES/JDK-21.0.2-temurin" "21.0.2-temurin"
 mkdir -p "$MAVEN_CANDIDATES/apache-maven-3.9.9"
 sk use java 21.0.2-temurin
@@ -1177,8 +1184,9 @@ assert_true "$([[ ! -f "$TEST_HOME/.skrc" ]] && echo true || echo false)" \
     "the JSON path actually removed the real file too"
 
 capture_sk_direct --format=json remove skrc
-assert_contains "$SK_OUT" '"status":"ok"' "removing an already-absent file is still status:ok"
-assert_contains "$SK_OUT" '"action":"not_present"' "reported as not_present, not an error"
+assert_contains "$SK_OUT" '"status":"ok"' "removing when nothing is found is still status:ok"
+assert_contains "$SK_OUT" '"action":"not_found"' "reported as not_found, not an error"
+assert_contains "$SK_OUT" '"path":null' "path:null when nothing was found"
 
 cd "$TEST_HOME"
 unset JAVA_HOME MAVEN_HOME GRADLE_HOME

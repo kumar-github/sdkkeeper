@@ -11,20 +11,6 @@ import (
 	"sdkkeeper/internal/tooldef"
 )
 
-// skrcHomePath is $HOME/.skrc -- the one fixed location `sk init skrc`
-// writes to and `sk remove skrc` deletes. Distinct from findSkrc's
-// walk-up lookup (used by `sk use` and the override-warning check),
-// which reads whichever .skrc it finds nearest to cwd -- not
-// necessarily this one, if cwd is a project directory elsewhere under
-// $HOME with its own .skrc closer by.
-func skrcHomePath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, skrcFileName), nil
-}
-
 // snapshotActiveSkrcEntries reads every tool that's currently active
 // in the CALLING shell (real *_HOME env vars, as this process sees
 // them -- never the persisted `default`, which is a different,
@@ -90,19 +76,25 @@ func renderSkrcContent(entries []skrcEntry) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// runInitSkrc implements `sk init skrc`. Refuses outright if one
-// already exists at $HOME/.skrc -- overwriting a real, possibly
-// hand-edited pin file would be exactly the kind of implicit mutation
-// sk avoids everywhere else (same instinct behind "no implicit
-// default"). `sk remove skrc` then `sk init skrc` is the explicit way
-// to regenerate.
+// runInitSkrc implements `sk init skrc`: writes <cwd>/.skrc, matching
+// the git-init/npm-init convention of acting on the current
+// directory, not a fixed location. Running it while standing in
+// $HOME is how you'd set a personal, global fallback -- that's just
+// the cwd=$HOME case of the same general rule, not special-cased.
+//
+// Refuses outright if <cwd>/.skrc already exists -- overwriting a
+// real, possibly hand-edited pin file would be exactly the kind of
+// implicit mutation sk avoids everywhere else (same instinct behind
+// "no implicit default"). `sk remove skrc` then `sk init skrc` is the
+// explicit way to regenerate.
 func runInitSkrc() error {
-	path, err := skrcHomePath()
+	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(session.Out)
-		fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 could not determine home directory: %s", err)))
+		fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 could not determine current directory: %s", err)))
 		return err
 	}
+	path := filepath.Join(cwd, skrcFileName)
 
 	if _, statErr := os.Stat(path); statErr == nil {
 		fmt.Fprintln(session.Out)
@@ -137,24 +129,33 @@ func runInitSkrc() error {
 	return nil
 }
 
-// runRemoveSkrc implements `sk remove skrc`: delete $HOME/.skrc.
-// Always the fixed $HOME location, matching runInitSkrc -- not a
-// walk-up delete of whichever .skrc a project directory happens to
-// have; that would risk deleting a file this command never created.
+// runRemoveSkrc implements `sk remove skrc`: walks up from cwd toward
+// $HOME (the SAME discovery findSkrc uses for `sk use`/`sk skrc`) and
+// deletes whichever .skrc it finds nearest -- "remove the .skrc
+// currently affecting me", mirroring "create one right here" now that
+// runInitSkrc is cwd-based too. Not a fixed-location delete anymore:
+// there is no longer one single file this command always targets.
 func runRemoveSkrc() error {
-	path, err := skrcHomePath()
+	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(session.Out)
-		fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 could not determine home directory: %s", err)))
+		fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 could not determine current directory: %s", err)))
 		return err
 	}
 
+	path, found, err := findSkrc(cwd)
+	if err != nil {
+		fmt.Fprintln(session.Out)
+		fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 could not read .skrc: %s", err)))
+		return err
+	}
+	if !found {
+		fmt.Fprintln(session.Out)
+		fmt.Fprintln(session.Out, styles.Neutral.Render("No .skrc found between here and $HOME — nothing to remove."))
+		return nil
+	}
+
 	if removeErr := os.Remove(path); removeErr != nil {
-		if os.IsNotExist(removeErr) {
-			fmt.Fprintln(session.Out)
-			fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("%s does not exist — nothing to remove.", path)))
-			return nil
-		}
 		fmt.Fprintln(session.Out)
 		fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 could not remove %s: %s", path, removeErr)))
 		return removeErr
@@ -177,15 +178,16 @@ type skrcInitData struct {
 	Entries []skrcInitEntryPayload `json:"entries"`
 }
 
-// buildInitSkrcJSON mirrors runInitSkrc exactly (same skrcHomePath/
+// buildInitSkrcJSON mirrors runInitSkrc exactly (same cwd/
 // snapshotActiveSkrcEntries/renderSkrcContent calls), so the JSON and
 // plain-text outcomes -- including the file actually written to disk
 // -- can never disagree.
 func buildInitSkrcJSON() (*skrcInitData, *jsonError) {
-	path, err := skrcHomePath()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, &jsonError{Code: ErrCodeInternalError, Message: err.Error()}
 	}
+	path := filepath.Join(cwd, skrcFileName)
 
 	if _, statErr := os.Stat(path); statErr == nil {
 		return nil, &jsonError{Code: ErrCodeSkrcAlreadyExists, Message: fmt.Sprintf("%s already exists", path)}
@@ -208,25 +210,30 @@ func buildInitSkrcJSON() (*skrcInitData, *jsonError) {
 
 // skrcRemoveData is `sk remove skrc`'s --format=json success shape.
 // Action is a closed, two-value enum -- "removed" when a real file
-// was deleted, "not_present" when there was nothing to remove; the
+// was deleted, "not_found" when the walk-up found nothing at all; the
 // latter is still status "ok", matching the plain-text path's own
-// "already gone is not an error" rule.
+// "nothing to remove is not an error" rule.
 type skrcRemoveData struct {
-	Path   string `json:"path"`
-	Action string `json:"action"`
+	Path   *string `json:"path"`
+	Action string  `json:"action"`
 }
 
 func buildRemoveSkrcJSON() (*skrcRemoveData, *jsonError) {
-	path, err := skrcHomePath()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, &jsonError{Code: ErrCodeInternalError, Message: err.Error()}
 	}
 
+	path, found, err := findSkrc(cwd)
+	if err != nil {
+		return nil, &jsonError{Code: ErrCodeInternalError, Message: err.Error()}
+	}
+	if !found {
+		return &skrcRemoveData{Path: nil, Action: "not_found"}, nil
+	}
+
 	if removeErr := os.Remove(path); removeErr != nil {
-		if os.IsNotExist(removeErr) {
-			return &skrcRemoveData{Path: path, Action: "not_present"}, nil
-		}
 		return nil, &jsonError{Code: ErrCodeInternalError, Message: removeErr.Error()}
 	}
-	return &skrcRemoveData{Path: path, Action: "removed"}, nil
+	return &skrcRemoveData{Path: &path, Action: "removed"}, nil
 }
