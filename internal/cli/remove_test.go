@@ -271,3 +271,70 @@ func TestRemove_NoVersionWithoutTTYReturnsVersionRequired(t *testing.T) {
 		t.Errorf("expected a clear, actionable message, got: %q", out)
 	}
 }
+
+// TestRemoveJSON_WasCurrentPrintsStderrHint confirms a real, reported
+// gap: --format=json genuinely cannot clear JAVA_HOME in the CALLING
+// shell (no subprocess can mutate its parent's environment), so
+// wasCurrent=true in the JSON alone was easy to see and still not act
+// on. This checks the plain-text stderr nudge that spells out the
+// exact command to run -- and, critically, that it goes to STDERR
+// ONLY, never stdout, so a script/agent parsing the JSON envelope on
+// stdout sees byte-for-byte the same output whether or not this hint
+// fires.
+func TestRemoveJSON_WasCurrentPrintsStderrHint(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	tool, _ := tooldef.Get("java")
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-temurin")
+	t.Setenv(tool.EnvVar, tool.HomePath(dir))
+
+	oldFormat := outputFormat
+	outputFormat = FormatJSON
+	defer func() { outputFormat = oldFormat }()
+
+	var stdout, stderr string
+	stderr = captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			cmd := newRemoveCmd()
+			if err := cmd.RunE(cmd, []string{"java", "21.0.2-temurin"}); err != nil {
+				t.Fatalf("expected success, got error: %v", err)
+			}
+		})
+	})
+
+	if !strings.Contains(stdout, `"wasCurrent":true`) {
+		t.Errorf("expected the JSON envelope to report wasCurrent:true, got: %q", stdout)
+	}
+	if strings.Contains(stdout, "note:") {
+		t.Errorf("expected the hint to NEVER appear on stdout, got: %q", stdout)
+	}
+	if !strings.Contains(stderr, "unset JAVA_HOME") {
+		t.Errorf("expected a stderr hint naming the exact command to run, got: %q", stderr)
+	}
+}
+
+// TestRemoveJSON_NoHintWhenNotCurrent confirms the hint is genuinely
+// conditional on wasCurrent, not printed unconditionally.
+func TestRemoveJSON_NoHintWhenNotCurrent(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+
+	oldFormat := outputFormat
+	outputFormat = FormatJSON
+	defer func() { outputFormat = oldFormat }()
+
+	stderr := captureStderr(t, func() {
+		captureStdout(t, func() {
+			cmd := newRemoveCmd()
+			if err := cmd.RunE(cmd, []string{"java", "21.0.2-temurin"}); err != nil {
+				t.Fatalf("expected success, got error: %v", err)
+			}
+		})
+	})
+
+	if stderr != "" {
+		t.Errorf("expected no stderr hint when wasCurrent is false, got: %q", stderr)
+	}
+}

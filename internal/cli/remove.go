@@ -25,13 +25,25 @@ func removeVersion(v inventory.Version) error {
 
 func newRemoveCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <tool> [version]",
-		Short: "Remove an installed or registered version",
+		Use:   "remove <tool|skrc> [version]",
+		Short: "Remove an installed or registered version, or delete $HOME/.skrc",
 		Example: `  sk remove java 21.0.2-temurin   # exact version, no picker
-  sk remove java                    # picker, matching 'use'`,
+  sk remove java                    # picker, matching 'use'
+  sk remove skrc                    # delete $HOME/.skrc (see 'sk init skrc')`,
 		Args: requireArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
+
+			// "skrc" isn't a tool -- special-cased before requireTool
+			// (which would otherwise report it as unknown) and before
+			// the version-arg logic below, which doesn't apply here.
+			if toolName == "skrc" {
+				if outputFormat == FormatJSON {
+					data, jerr := buildRemoveSkrcJSON()
+					return emitJSON(data, jerr)
+				}
+				return runRemoveSkrc()
+			}
 
 			version := ""
 			if len(args) == 2 {
@@ -40,7 +52,22 @@ func newRemoveCmd() *cobra.Command {
 
 			if outputFormat == FormatJSON {
 				data, jerr := resolveRemoveJSON(toolName, version)
-				return emitJSON(data, jerr)
+				err := emitJSON(data, jerr)
+				// A plain-text nudge on stderr, never stdout -- the
+				// JSON envelope on stdout is untouched by this, so a
+				// script/agent parsing it sees exactly the same
+				// output either way. This exists because --format=json
+				// genuinely cannot clear JAVA_HOME in the CALLING
+				// shell (no subprocess can mutate its parent's
+				// environment), so wasCurrent=true on its own is easy
+				// to see and still not act on -- this spells out the
+				// exact command to run, for a human testing this
+				// interactively rather than a script that already
+				// knows to check wasCurrent itself.
+				if jerr == nil && data.WasCurrent {
+					fmt.Fprintf(os.Stderr, "note: %s was active in this shell -- run `unset %s` to clear it (this process can't modify your shell's environment)\n", data.EnvVar, data.EnvVar)
+				}
+				return err
 			}
 
 			tool, err := requireTool(toolName)

@@ -84,7 +84,7 @@ func searchMajors(ctx context.Context, tool tooldef.Tool, provider registry.Prov
 		}
 		rows[i] = []string{info.Number, ltsLabel}
 	}
-	fmt.Fprint(session.Out, indentLines(renderTable(rows, 2, tableWidth(rows, 2), nil), "  "))
+	fmt.Fprint(session.Out, indentLines(renderBorderedTable([]string{"VERSION", "LTS"}, rows, styles.Header), "  "))
 	return nil
 }
 
@@ -128,7 +128,7 @@ func searchPatches(ctx context.Context, tool tooldef.Tool, provider registry.Pro
 		}
 		rows[i] = []string{p, marker}
 	}
-	fmt.Fprint(session.Out, indentLines(renderTable(rows, 2, tableWidth(rows, 2), nil), "  "))
+	fmt.Fprint(session.Out, indentLines(renderBorderedTable([]string{"VERSION", "STATUS"}, rows, styles.Header), "  "))
 	return nil
 }
 

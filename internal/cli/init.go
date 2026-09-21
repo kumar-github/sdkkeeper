@@ -10,9 +10,13 @@ import (
 
 func newInitCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "init <shell>",
-		Short: "Print shell integration for zsh, nu, or powershell",
-		Long: `Print shell integration for zsh, nu, or powershell (pwsh is accepted as an alias for powershell).
+		Use:   "init <shell|skrc>",
+		Short: "Print shell integration for zsh/nu/powershell, or create $HOME/.skrc (sk init skrc)",
+		Long: `Print shell integration for zsh, nu, or powershell (pwsh is accepted as an alias for powershell) --
+or, with 'sk init skrc', create $HOME/.skrc from whatever tools are currently
+active in this shell (see 'sk remove skrc' to delete it, and 'sk use' with no
+arguments to apply a project's own .skrc). The rest of this text covers only
+the shell-integration form.
 
   zsh:        eval "$(sk init zsh)"          # in .zshrc
   nu:         sk init nu | save -f ($nu.data-dir | path join "vendor/autoload/sk.nu")
@@ -92,6 +96,14 @@ for every tool you add this for. That's a known, accepted trade-off,
 not a bug.`,
 		Args: requireArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if args[0] == "skrc" {
+				if outputFormat == FormatJSON {
+					data, jerr := buildInitSkrcJSON()
+					return emitJSON(data, jerr)
+				}
+				return runInitSkrc()
+			}
+
 			script, err := shellhook.Get(args[0])
 			if err != nil {
 				return err

@@ -55,6 +55,14 @@ if ! command -v "$SK_BIN" >/dev/null 2>&1 && [[ ! -x "$SK_BIN" ]]; then
     exit 1
 fi
 SK_BIN="$(command -v "$SK_BIN" 2>/dev/null || echo "$SK_BIN")"
+# Resolved to an absolute path (zsh's :A modifier) BEFORE anything
+# below ever changes directory. A relative invocation (bare "sk" via
+# PATH lookup can still yield a relative result on some shells, or an
+# explicit "./sk") only ever worked because no section used to `cd`
+# anywhere -- Section P is the first to actually change directories
+# mid-run (to exercise .skrc's directory-walk-up behavior for real),
+# and a still-relative SK_BIN silently breaks the moment cwd changes.
+SK_BIN="${SK_BIN:A}"
 SK_DIR="$(dirname "$SK_BIN")"
 
 TEST_HOME="$(mktemp -d)"
@@ -512,7 +520,7 @@ step "remove with too many args"
 capture_sk remove java 21.0.2-temurin extra
 out="$SK_OUT"
 print -r -- "$out"
-assert_contains "$out" "usage: sk remove <tool> [version]" "clear usage message"
+assert_contains "$out" "usage: sk remove <tool|skrc> [version]" "clear usage message"
 
 step "doctor with an unexpected arg (it takes none at all)"
 out=$(sk doctor unexpected 2>&1)
@@ -921,6 +929,20 @@ PATH="${PATH//$json_removed_bin_path:/}"
 assert_true "$([[ -z "${JAVA_HOME:-}" ]] && echo true || echo false)" "JAVA_HOME correctly cleared by a caller acting on wasCurrent+envVar alone"
 assert_true "$([[ "$PATH" != *"$json_removed_bin_path"* ]] && echo true || echo false)" "the removed JDK's bin directory is correctly gone from PATH"
 
+step "remove --format=json prints a plain-text hint on STDERR (never stdout) when wasCurrent is true -- a real, reported gap: seeing wasCurrent:true in the JSON alone still didn't tell a human what to actually type"
+fake_jdk "$CANDIDATES/JDK-9-temurin" "9-temurin"
+export JAVA_HOME="$CANDIDATES/JDK-9-temurin"
+hint_stdout=$(mktemp)
+hint_stderr=$(mktemp)
+"$SK_BIN" --format=json remove java 9-temurin > "$hint_stdout" 2> "$hint_stderr"
+print "  stdout: $(cat "$hint_stdout")"
+print "  stderr: $(cat "$hint_stderr")"
+assert_not_contains "$(cat "$hint_stdout")" "note:" "the hint never appears on stdout -- a script/agent parsing the JSON sees it unchanged"
+assert_contains "$(cat "$hint_stdout")" '"wasCurrent":true' "the JSON envelope itself is untouched by the hint"
+assert_contains "$(cat "$hint_stderr")" "unset JAVA_HOME" "stderr names the exact command to run"
+rm -f "$hint_stdout" "$hint_stderr"
+unset JAVA_HOME
+
 step "remove --format=json reports wasCurrent/wasDefault false when neither applies -- not a hardcoded true"
 fake_jdk "$CANDIDATES/JDK-11-temurin" "11-temurin"
 fake_jdk "$CANDIDATES/JDK-8-temurin" "8-temurin"
@@ -1011,6 +1033,156 @@ rm -f "$CANDIDATES/JDK-dangling-json-test"
 # separate, deliberate piece of work, not a byproduct of adding this
 # section) -- flagged to the user directly instead of silently patched
 # or silently ignored.
+
+# ════════════════════════════════════════════════════════════════
+section "P. .skrc lifecycle (init skrc, remove skrc, bare skrc, use with no arguments)"
+# ════════════════════════════════════════════════════════════════
+# NOTE: findSkrc's $HOME-boundary stop (a .skrc placed ABOVE $HOME
+# must never be found) is deliberately NOT re-exercised here -- doing
+# so would mean writing a file above $TEST_HOME, which breaks this
+# script's own "never touches anything outside its throwaway HOME"
+# safety guarantee. Already covered directly by
+# TestFindSkrc_StopsAtHomeBoundary in the Go test suite.
+unset JAVA_HOME MAVEN_HOME GRADLE_HOME
+MAVEN_CANDIDATES="$TEST_HOME/.sdkkeeper/candidates/maven"
+
+step "P1. 'sk init skrc' with nothing active -- comment-only placeholder"
+capture_sk_direct init skrc
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "no tools were active" "reports the empty case in plain text"
+assert_true "$([[ -f "$TEST_HOME/.skrc" ]] && echo true || echo false)" \
+    "\$HOME/.skrc was actually created"
+assert_true "$([[ "$(cat "$TEST_HOME/.skrc")" == \#* ]] && echo true || echo false)" \
+    "the empty file is a '#' comment placeholder, not zero bytes"
+
+step "P2. 'sk remove skrc' cleans it back up"
+capture_sk_direct remove skrc
+assert_contains "$SK_OUT" "Removed" "reports the removal"
+assert_true "$([[ ! -f "$TEST_HOME/.skrc" ]] && echo true || echo false)" \
+    "\$HOME/.skrc is actually gone"
+
+step "P2b. 'sk remove skrc' again -- already gone is NOT an error"
+capture_sk_direct remove skrc
+assert_exit_code "$SK_EXIT" "0" "removing an already-absent .skrc is not an error"
+assert_contains "$SK_OUT" "does not exist" "says plainly there was nothing to remove"
+
+step "P3. Activate java + maven for real, then 'sk init skrc' snapshots both"
+fake_jdk "$CANDIDATES/JDK-21.0.2-temurin" "21.0.2-temurin"
+mkdir -p "$MAVEN_CANDIDATES/apache-maven-3.9.9"
+sk use java 21.0.2-temurin
+sk use maven 3.9.9
+compare_state JAVA_HOME
+capture_sk_direct init skrc
+skrc_contents=$(cat "$TEST_HOME/.skrc")
+print -r -- "$skrc_contents"
+assert_contains "$skrc_contents" "java=21.0.2-temurin" "java's active version was snapshotted"
+assert_contains "$skrc_contents" "maven=3.9.9" "maven's active version was snapshotted"
+
+step "P4. 'sk init skrc' again -- refuses, real file untouched"
+capture_sk_direct init skrc
+assert_contains "$SK_OUT" "already exists" "refuses rather than silently overwriting"
+assert_contains "$(cat "$TEST_HOME/.skrc")" "java=21.0.2-temurin" \
+    "the real, existing .skrc was NOT overwritten"
+
+step "P5. Bare 'sk skrc' from a project directory reports path + per-entry status"
+unset MAVEN_HOME # java stays active from P3; maven must show installed-but-NOT-active here
+PROJ_DIR="$TEST_HOME/proj"
+mkdir -p "$PROJ_DIR/src/nested"
+fake_jdk "$CANDIDATES/JDK-17.0.9-temurin" "17.0.9-temurin"
+cat > "$PROJ_DIR/.skrc" << EOF
+java=21.0.2-temurin
+maven=3.9.9
+gradle=8.5
+foo=1.0
+EOF
+cd "$PROJ_DIR/src/nested"
+capture_sk_direct skrc
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "$PROJ_DIR/.skrc" "reports the real path, found by walking up from a nested subdirectory"
+assert_contains "$SK_OUT" "installed, active" "java is reported installed AND active (it's what's currently in use)"
+assert_contains "$SK_OUT" "installed, not active" "maven is reported installed but not the active one"
+assert_contains "$SK_OUT" "not installed" "gradle (never installed) is reported as such"
+assert_contains "$SK_OUT" "unknown tool" "foo (not a real tool) is reported as such"
+
+step "P6. 'sk use' (no arguments) from the same project applies every candidate"
+unset JAVA_HOME MAVEN_HOME
+capture_sk use
+print -r -- "$SK_OUT"
+compare_state JAVA_HOME
+assert_contains "$SK_OUT" "(.skrc)" "output is clearly attributed to .skrc, one line per candidate"
+assert_true "$([[ "${JAVA_HOME:-}" == *JDK-21.0.2-temurin* ]] && echo true || echo false)" \
+    "JAVA_HOME actually reflects the .skrc-pinned java version in THIS shell"
+assert_true "$([[ "${MAVEN_HOME:-}" == *apache-maven-3.9.9* ]] && echo true || echo false)" \
+    "MAVEN_HOME actually reflects the .skrc-pinned maven version in THIS shell"
+
+step "P7. Explicit 'sk use java <other version>' overrides the .skrc pin with a warning"
+capture_sk use java 17.0.9-temurin
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "Overriding project JDK 21.0.2-temurin with 17.0.9-temurin for this shell" \
+    "override warning uses the exact agreed wording"
+assert_true "$([[ "${JAVA_HOME:-}" == *JDK-17.0.9-temurin* ]] && echo true || echo false)" \
+    "the explicitly requested version still wins, despite the .skrc pin"
+
+step "P8. 'sk use' (no arguments) with NO .skrc anywhere -- both explanation and usage line"
+cd "$TEST_HOME"
+rm -f "$TEST_HOME/.skrc" # the real one 'sk init skrc' created back in P3/P4 -- must be gone for this case to be genuine
+capture_sk_direct use
+assert_exit_code "$SK_EXIT" "1" "fails cleanly when there's no tool name and no .skrc"
+assert_contains "$SK_OUT" "sk use requires a tool name" "explains both ways to resolve it"
+assert_contains "$SK_OUT" "usage: sk use [<tool> [version|null]]" \
+    "the original usage line is still present, not silently dropped"
+
+step "P9. Batch --format=json: real activation AND a genuine partial failure, together"
+cd "$PROJ_DIR"
+# $PROJ_DIR/.skrc (from P5) has java+maven installed, gradle NOT
+# installed, and an unknown tool "foo" -- a real, both-outcomes batch.
+capture_sk_direct --format=json use
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"status":"ok"' "the envelope itself is status:ok despite two failing candidates"
+assert_contains "$SK_OUT" '"activated":2' "summary.activated counts java+maven"
+assert_contains "$SK_OUT" '"failed":2' "summary.failed counts gradle+foo"
+assert_contains "$SK_OUT" '"code":"not_found"' "gradle's own result reports not_found"
+assert_contains "$SK_OUT" '"code":"ambiguous_tool"' "foo's own result reports ambiguous_tool"
+assert_exit_code "$SK_EXIT" "112" "skrc_batch_partial_failure's own exit code, even though the envelope said ok"
+
+step "P10. Bare 'sk skrc' has a REAL --format=json schema (not a stopgap)"
+cd "$TEST_HOME"
+echo "java=21.0.2-temurin" > "$TEST_HOME/.skrc"
+capture_sk_direct --format=json skrc
+assert_contains "$SK_OUT" '"status":"ok"' "a real success envelope"
+assert_contains "$SK_OUT" '"tool":"java"' "the real entry is present in the JSON payload"
+rm -f "$TEST_HOME/.skrc"
+capture_sk_direct --format=json skrc
+assert_contains "$SK_OUT" '"path":null' "path:null when no .skrc exists, matching the plain-text 'No .skrc found' case"
+
+step "P11. 'sk init skrc'/'sk remove skrc' also have real --format=json schemas"
+unset JAVA_HOME MAVEN_HOME
+sk use java 21.0.2-temurin
+sk use maven 3.9.9
+capture_sk_direct --format=json init skrc
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"status":"ok"' "init skrc succeeds"
+assert_contains "$SK_OUT" '"tool":"java"' "java's active version is in the payload"
+assert_contains "$SK_OUT" '"tool":"maven"' "maven's active version is in the payload"
+assert_true "$([[ -f "$TEST_HOME/.skrc" ]] && echo true || echo false)" \
+    "the JSON path actually wrote the real file too"
+
+capture_sk_direct --format=json init skrc
+assert_contains "$SK_OUT" '"code":"skrc_already_exists"' "refuses via JSON exactly like the plain-text path does"
+assert_exit_code "$SK_EXIT" "106" "skrc_already_exists' own exit code"
+
+capture_sk_direct --format=json remove skrc
+assert_contains "$SK_OUT" '"action":"removed"' "removed via JSON"
+assert_true "$([[ ! -f "$TEST_HOME/.skrc" ]] && echo true || echo false)" \
+    "the JSON path actually removed the real file too"
+
+capture_sk_direct --format=json remove skrc
+assert_contains "$SK_OUT" '"status":"ok"' "removing an already-absent file is still status:ok"
+assert_contains "$SK_OUT" '"action":"not_present"' "reported as not_present, not an error"
+
+cd "$TEST_HOME"
+unset JAVA_HOME MAVEN_HOME GRADLE_HOME
+rm -f "$TEST_HOME/.skrc"
 
 # ════════════════════════════════════════════════════════════════
 section "Summary"

@@ -56,6 +56,16 @@ type Result struct {
 	// printed immediately at generation time; that caused a picker
 	// flash/cutoff bug.
 	Messages []string
+
+	// ActivatedTool and ActivatedVersion record what resolveUse
+	// actually activated, set only on success (e.g. after a picker
+	// resolves to a real choice) -- empty otherwise. Not used by
+	// writeResult; only by callers that need to know the resolved
+	// version after the fact, e.g. use.go's .skrc override check,
+	// which must compare against the real outcome, not the (possibly
+	// empty, picker-triggering) argument the user typed.
+	ActivatedTool    string
+	ActivatedVersion string
 }
 
 func newResult() *Result {
@@ -310,6 +320,9 @@ func resolveUse(sess *term.Session, styles term.Styles, toolName, versionArg, in
 		Dir:         tool.BinPath(v.Path),
 		StripPrefix: tool.CandidateRoot(),
 	})
+
+	result.ActivatedTool = tool.Name
+	result.ActivatedVersion = version
 
 	confirmation := styles.Success.Render(
 		fmt.Sprintf("\u2713 %s %s — active for this shell session only", tool.DisplayName, version),

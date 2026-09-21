@@ -86,18 +86,80 @@ const (
 	// invocation error, so it's paired with a success envelope (see
 	// emitDoctorJSON).
 	ErrCodeDoctorCheckFailed ErrorCode = "doctor_check_failed"
+	// ErrCodeInvalidPath (exit 105): add's source path doesn't exist,
+	// isn't accessible, or isn't a directory.
+	ErrCodeInvalidPath ErrorCode = "invalid_path"
+	// ErrCodeAlreadyRegistered (exit 106): add's tool+version is
+	// already registered (a real directory or symlink already
+	// occupies that slot).
+	ErrCodeAlreadyRegistered ErrorCode = "already_registered"
+	// ErrCodeAlreadyInstalled (exit 106): install's tool+version is
+	// already installed. Shares its exit code with
+	// ErrCodeAlreadyRegistered -- both are the same "this slot is
+	// already taken" shape, just for add vs install -- while keeping
+	// distinct error.code strings, since that's what a JSON-parsing
+	// caller actually branches on (see the exit-code table's own
+	// doc comment).
+	ErrCodeAlreadyInstalled ErrorCode = "already_installed"
+	// ErrCodeDownloadFailed (exit 107): install's download failed
+	// (network error, or every retry attempt exhausted).
+	ErrCodeDownloadFailed ErrorCode = "download_failed"
+	// ErrCodeChecksumMismatch (exit 108): install downloaded an
+	// archive that failed checksum verification.
+	ErrCodeChecksumMismatch ErrorCode = "checksum_mismatch"
+	// ErrCodeVendorRequired (exit 109): a version was given but the
+	// vendor is still ambiguous for a multi-vendor tool -- the
+	// vendor-picker counterpart to ErrCodeVersionRequired, which
+	// covers "no version at all". Applies wherever a vendor picker
+	// would otherwise be shown (install, and use/remove for a
+	// vendor-ambiguous identifier).
+	ErrCodeVendorRequired ErrorCode = "vendor_required"
+	// ErrCodeNotImplemented (exit 110): the requested operation has
+	// no --format=json shape yet, even though its interactive
+	// counterpart works. Nothing currently uses this -- every
+	// command that once did (use with no args, init skrc, remove
+	// skrc, bare skrc) now has a real schema -- but it's kept as a
+	// legitimate, general-purpose stopgap for any future command
+	// built interactive-first.
+	ErrCodeNotImplemented ErrorCode = "not_implemented"
+	// ErrCodeSkrcNotFound (exit 111): a command that requires an
+	// existing .skrc to act on (currently just `sk use` with no
+	// arguments) found none between cwd and $HOME.
+	ErrCodeSkrcNotFound ErrorCode = "skrc_not_found"
+	// ErrCodeSkrcAlreadyExists (exit 106): `sk init skrc` found an
+	// existing $HOME/.skrc and refused to overwrite it. Shares its
+	// exit code with ErrCodeAlreadyRegistered/ErrCodeAlreadyInstalled
+	// -- same "this slot is already taken" shape, distinct string.
+	ErrCodeSkrcAlreadyExists ErrorCode = "skrc_already_exists"
+	// ErrCodeSkrcBatchPartialFailure (exit 112): `sk use` with no
+	// arguments applied a .skrc, but one or more of its candidates
+	// failed to activate. Paired with a SUCCESS envelope (status
+	// "ok", full per-candidate results and summary) -- same principle
+	// as ErrCodeDoctorCheckFailed: a partial finding within an
+	// otherwise-completed run is not an invocation error.
+	ErrCodeSkrcBatchPartialFailure ErrorCode = "skrc_batch_partial_failure"
 )
 
 // exitCodeTable is the complete, frozen exit-code mapping. Kept small
 // and coarse -- codes wrap at 256 -- with all real detail living in
 // error.code strings instead.
 var exitCodeTable = map[ErrorCode]int{
-	ErrCodeInternalError:     1,
-	ErrCodeVersionRequired:   101,
-	ErrCodeNotFound:          102,
-	ErrCodeActivationFailed:  103,
-	ErrCodeAmbiguousTool:     104,
-	ErrCodeDoctorCheckFailed: 201,
+	ErrCodeInternalError:           1,
+	ErrCodeVersionRequired:         101,
+	ErrCodeNotFound:                102,
+	ErrCodeActivationFailed:        103,
+	ErrCodeAmbiguousTool:           104,
+	ErrCodeInvalidPath:             105,
+	ErrCodeAlreadyRegistered:       106,
+	ErrCodeAlreadyInstalled:        106,
+	ErrCodeDownloadFailed:          107,
+	ErrCodeChecksumMismatch:        108,
+	ErrCodeVendorRequired:          109,
+	ErrCodeNotImplemented:          110,
+	ErrCodeSkrcNotFound:            111,
+	ErrCodeSkrcAlreadyExists:       106,
+	ErrCodeSkrcBatchPartialFailure: 112,
+	ErrCodeDoctorCheckFailed:       201,
 }
 
 func exitCodeFor(code ErrorCode) int {
@@ -207,6 +269,12 @@ const (
 	actionRemoved        activationAction = "removed"
 	actionDefaulted      activationAction = "defaulted"
 	actionDefaultCleared activationAction = "default_cleared"
+	// actionAdded is add's action value -- registering an existing,
+	// externally-managed install under a version label.
+	actionAdded activationAction = "added"
+	// actionInstalled is install's action value -- downloading and
+	// placing a brand-new version.
+	actionInstalled activationAction = "installed"
 )
 
 // activationPayload is the shared success `data` shape for use,
@@ -231,6 +299,18 @@ func vendorOf(toolName, version string) *string {
 		return &vendor
 	}
 	return nil
+}
+
+// vendorPtr wraps vendorName as *string (JSON null for a single-
+// vendor tool), for a caller that already knows the vendor name
+// directly -- e.g. install, which resolves a provider (and so its
+// name) itself, rather than needing it parsed back out of a version
+// string's suffix the way vendorOf does for use/remove/list/search.
+func vendorPtr(toolName, vendorName string) *string {
+	if hasSingleVendor(toolName) {
+		return nil
+	}
+	return &vendorName
 }
 
 // versionRequiredNoTTY is the interactive-path counterpart to
