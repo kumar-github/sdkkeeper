@@ -1259,6 +1259,51 @@ assert_exit_code "$SK_EXIT" "0" "clean exit when there's nothing to fix"
 rm -f "$TEST_HOME/.sdkkeeper/defaults/java"
 
 # ════════════════════════════════════════════════════════════════
+section "R. 'sk list' with no arguments -- only tools with something installed, plus a real empty state"
+# ════════════════════════════════════════════════════════════════
+cd "$TEST_HOME"
+
+step "R1. Isolated fresh HOME, only java installed: java's section shows, empty tools do NOT"
+R_ISOLATED_HOME="$(mktemp -d)"
+R_SAVED_HOME="$HOME"
+export HOME="$R_ISOLATED_HOME"
+R_CANDIDATES="$R_ISOLATED_HOME/.sdkkeeper/candidates/java"
+fake_jdk "$R_CANDIDATES/JDK-17.0.9-temurin" "17.0.9-temurin"
+capture_sk_direct list
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "JDK:" "java's section header is present -- it has something installed"
+assert_contains "$SK_OUT" "17.0.9-temurin" "the real installed java version is shown"
+assert_not_contains "$SK_OUT" "Maven:" "maven has nothing installed -- its section must NOT appear at all"
+assert_not_contains "$SK_OUT" "Gradle:" "gradle has nothing installed -- its section must NOT appear at all"
+assert_not_contains "$SK_OUT" "Kafka:" "kafka has nothing installed -- its section must NOT appear at all"
+assert_contains "$SK_OUT" "sk list <tool>" "the closing narrowing tip is shown"
+
+step "R2. Isolated EMPTY HOME, nothing installed anywhere: one short message, no sections"
+R_EMPTY_HOME="$(mktemp -d)"
+export HOME="$R_EMPTY_HOME"
+capture_sk_direct list
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "Nothing installed yet" "the real empty-state message is shown"
+assert_contains "$SK_OUT" "sk install <tool>" "points at sk install to get started"
+assert_contains "$SK_OUT" "sk tools" "points at sk tools to see what's supported"
+assert_not_contains "$SK_OUT" "JDK:" "no per-tool section appears when nothing at all is installed"
+assert_exit_code "$SK_EXIT" "0" "an empty state is not an error"
+
+export HOME="$R_SAVED_HOME"
+
+step "R3. 'sk list java' (explicit tool) is completely unaffected by any of this"
+fake_jdk "$CANDIDATES/JDK-17.0.9-temurin" "17.0.9-temurin"
+capture_sk_direct list java
+assert_contains "$SK_OUT" "17.0.9-temurin" "single-tool output still works exactly as before"
+assert_not_contains "$SK_OUT" "Maven:" "single-tool output never shows other tools' sections"
+
+step "R4. --format=json now matches text exactly -- empty tools excluded there too"
+capture_sk_direct --format=json list
+assert_contains "$SK_OUT" '"status":"ok"' "a real success envelope"
+assert_contains "$SK_OUT" '"tools":[' "the tools array is present"
+assert_contains "$SK_OUT" '"tool":"java"' "java's entry is present -- it has something installed"
+
+# ════════════════════════════════════════════════════════════════
 section "Summary"
 # ════════════════════════════════════════════════════════════════
 print ""

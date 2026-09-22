@@ -14,10 +14,25 @@ import (
 
 func newListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list <tool>",
-		Short: "Show installed versions of a tool",
-		Args:  requireArgs(cobra.ExactArgs(1)),
+		Use:   "list [<tool>]",
+		Short: "Show installed versions of a tool, or every tool",
+		Example: `  sk list java   # just java
+  sk list        # every registered tool, one section each`,
+		Args: requireArgs(cobra.RangeArgs(0, 1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// No tool name given -- show every registered tool, one
+			// section each, rather than requiring N separate calls.
+			// Deliberately NOT a --all-tools flag: sk's own vocabulary
+			// treats a distinct target/scope as a positional word (or,
+			// as here, the ABSENCE of one meaning "every tool" -- the
+			// same pattern `sk use` already uses for its own
+			// zero-arg .skrc-batch case), never a flag for that.
+			if len(args) == 0 {
+				if outputFormat == FormatJSON {
+					return emitJSON(buildAllToolsListJSON(), nil)
+				}
+				return printAllToolsList()
+			}
 			toolName := args[0]
 
 			// --format=json is a pure, read-only report.
@@ -36,93 +51,143 @@ func newListCmd() *cobra.Command {
 				return err
 			}
 
-			// Determined ONCE, tool-wide -- current/default are facts
-			// about the TOOL, not about which group (managed vs not)
-			// an entry happens to fall into.
-			var currentVersion string
-			if tool.EnvVar != "" {
-				if envVal, isSet := os.LookupEnv(tool.EnvVar); isSet {
-					if v, ok := findActiveVersion(tool, versions, envVal); ok {
-						currentVersion = v.Number
-					}
-				}
-			}
-			defaultVersion, _ := readDefault(tool)
-
-			// Returns the PLAIN (unstyled) current/default tag text
-			// for a version -- coloring happens later, via
-			// renderTable's styleFunc, not baked into these strings.
-			// A real, confirmed reason for that split: lipgloss/table
-			// miscalculates column widths when cell content carries
-			// embedded ANSI codes (verified directly -- it silently
-			// truncated real version numbers when a neighboring cell
-			// was pre-styled), so styling must stay separate from the
-			// text itself, applied only at render time.
-			annotate := func(v inventory.Version) (currentTag, defaultTag string) {
-				if v.Number == currentVersion {
-					currentTag = "(current)"
-				}
-				if v.Number == defaultVersion {
-					defaultTag = "(default)"
-				}
-				return currentTag, defaultTag
-			}
-
-			// Grouped by managed/not-managed with a header stated ONCE
-			// per group, rather than repeating the full phrase on every
-			// single line -- an earlier version of this did the latter
-			// and became a genuinely crowded wall of text once more
-			// than a couple of entries were present. Each group's
-			// versions stay in their existing sort order (already
-			// newest-first from inventory.Scan); an empty group's
-			// header is simply omitted rather than printed with
-			// nothing underneath it.
-			var managed, external []inventory.Version
-			for _, v := range versions {
-				if v.External {
-					external = append(external, v)
-				} else {
-					managed = append(managed, v)
-				}
-			}
-
-			// A real bug caught via actual use: with nothing installed
-			// OR added, this printed absolutely nothing at all --
-			// looking exactly like the command had silently failed or
-			// hung, rather than clearly communicating "there's
-			// nothing here yet".
-			if len(managed) == 0 && len(external) == 0 {
-				fmt.Println()
-				fmt.Println(styles.Neutral.Render(fmt.Sprintf("No %s versions found to list.", tool.DisplayName)))
-				return nil
-			}
-
-			// Exactly one blank line separates the command from its
-			// output, consistently across every command in this tool
-			// -- but only when there's actually something to follow it
-			// (an empty result shouldn't print a lone blank line with
-			// nothing after it).
 			fmt.Println()
-			printedManaged := printManagedGroup(tool, styles.Header.Render("Managed by SDK Keeper:"), managed, annotate)
-			if printedManaged && len(external) > 0 {
-				fmt.Println()
-			}
-			// Not managed entries are deliberately NEVER grouped by
-			// vendor, even when a label happens to look like a known
-			// vendor suffix (e.g. someone `add`-registered an
-			// external JDK as "17.0.3-temurin") -- that label is
-			// arbitrary user-typed text with no verified relationship
-			// to the actual JDK at that path (using the label
-			// "temurin" on a Liberica JDK doesn't make it Temurin).
-			// Grouping by it would present unverified input as if it
-			// were a confirmed fact, unlike the managed section below,
-			// where the suffix is data sk itself generated during a
-			// real, verified install.
-			printGroup(styles.Header.Render("Not managed by SDK Keeper:"), external, annotate, "  ")
-
+			printToolListBody(tool, versions)
 			return nil
 		},
 	}
+}
+
+// printToolListBody renders one tool's installed versions -- exactly
+// today's single-tool `sk list <tool>` body, extracted so
+// printAllToolsList can call it once per tool without duplicating any
+// of this logic. Deliberately prints no leading blank line of its
+// own -- the caller controls spacing, since that differs between the
+// single-tool case (one blank line before this) and the all-tools
+// case (a tool-name header immediately before this, no extra blank
+// between them).
+func printToolListBody(tool tooldef.Tool, versions []inventory.Version) {
+	// Determined ONCE, tool-wide -- current/default are facts about
+	// the TOOL, not about which group (managed vs not) an entry
+	// happens to fall into.
+	var currentVersion string
+	if tool.EnvVar != "" {
+		if envVal, isSet := os.LookupEnv(tool.EnvVar); isSet {
+			if v, ok := findActiveVersion(tool, versions, envVal); ok {
+				currentVersion = v.Number
+			}
+		}
+	}
+	defaultVersion, _ := readDefault(tool)
+
+	// Returns the PLAIN (unstyled) current/default tag text for a
+	// version -- coloring happens later, via renderTable's styleFunc,
+	// not baked into these strings. A real, confirmed reason for that
+	// split: lipgloss/table miscalculates column widths when cell
+	// content carries embedded ANSI codes (verified directly -- it
+	// silently truncated real version numbers when a neighboring cell
+	// was pre-styled), so styling must stay separate from the text
+	// itself, applied only at render time.
+	annotate := func(v inventory.Version) (currentTag, defaultTag string) {
+		if v.Number == currentVersion {
+			currentTag = "(current)"
+		}
+		if v.Number == defaultVersion {
+			defaultTag = "(default)"
+		}
+		return currentTag, defaultTag
+	}
+
+	// Grouped by managed/not-managed with a header stated ONCE per
+	// group, rather than repeating the full phrase on every single
+	// line -- an earlier version of this did the latter and became a
+	// genuinely crowded wall of text once more than a couple of
+	// entries were present. Each group's versions stay in their
+	// existing sort order (already newest-first from
+	// inventory.Scan); an empty group's header is simply omitted
+	// rather than printed with nothing underneath it.
+	var managed, external []inventory.Version
+	for _, v := range versions {
+		if v.External {
+			external = append(external, v)
+		} else {
+			managed = append(managed, v)
+		}
+	}
+
+	// A real bug caught via actual use: with nothing installed OR
+	// added, this printed absolutely nothing at all -- looking
+	// exactly like the command had silently failed or hung, rather
+	// than clearly communicating "there's nothing here yet".
+	if len(managed) == 0 && len(external) == 0 {
+		fmt.Println(styles.Neutral.Render(fmt.Sprintf("No %s versions found to list.", tool.DisplayName)))
+		return
+	}
+
+	printedManaged := printManagedGroup(tool, styles.Header.Render("Managed by SDK Keeper:"), managed, annotate)
+	if printedManaged && len(external) > 0 {
+		fmt.Println()
+	}
+	// Not managed entries are deliberately NEVER grouped by vendor,
+	// even when a label happens to look like a known vendor suffix
+	// (e.g. someone `add`-registered an external JDK as
+	// "17.0.3-temurin") -- that label is arbitrary user-typed text
+	// with no verified relationship to the actual JDK at that path
+	// (using the label "temurin" on a Liberica JDK doesn't make it
+	// Temurin). Grouping by it would present unverified input as if
+	// it were a confirmed fact, unlike the managed section above,
+	// where the suffix is data sk itself generated during a real,
+	// verified install.
+	printGroup(styles.Header.Render("Not managed by SDK Keeper:"), external, annotate, "  ")
+}
+
+// printAllToolsList implements `sk list` with no arguments: one
+// section per tool that actually has something installed, in the
+// same deliberate presentation order doctor already uses (sortedTools
+// -- Java, then Maven/Gradle, which both require it).
+//
+// Tools with NOTHING installed are skipped entirely here -- unlike an
+// earlier version of this, which showed every registered tool
+// including empty ones. That reasoning didn't hold up: `list`'s own
+// job is showing what's INSTALLED, and `sk tools` already exists
+// specifically to answer "what does sk support" regardless of
+// install state. Duplicating that here, and doing it worse as the
+// registry grows past a handful of tools (a wall of "No X versions
+// found" lines drowning the 2-3 tools someone actually has), served
+// no one. --format=json filters the same way, for the same reason --
+// see buildAllToolsListJSON's own doc comment.
+func printAllToolsList() error {
+	type populated struct {
+		tool     tooldef.Tool
+		versions []inventory.Version
+	}
+	var withInstalls []populated
+	for _, tool := range sortedTools() {
+		versions, err := inventory.Scan(tool)
+		if err != nil {
+			return err
+		}
+		if len(versions) == 0 {
+			continue
+		}
+		withInstalls = append(withInstalls, populated{tool, versions})
+	}
+
+	if len(withInstalls) == 0 {
+		fmt.Println()
+		fmt.Println(styles.Neutral.Render("Nothing installed yet."))
+		fmt.Println(styles.Detail.Render("  Run `sk install <tool>` to get started, or `sk tools` to see what's supported."))
+		return nil
+	}
+
+	for _, p := range withInstalls {
+		fmt.Println()
+		fmt.Println(styles.Header.Render(p.tool.DisplayName + ":"))
+		printToolListBody(p.tool, p.versions)
+	}
+	fmt.Println()
+	fmt.Println(styles.Detail.Render("Tip: `sk list <tool>` shows just one."))
+	return nil
 }
 
 // printManagedGroup prints the "Managed by SDK Keeper" section,
@@ -406,4 +471,46 @@ func buildListJSON(toolName string) (*listData, *jsonError) {
 	}
 
 	return &listData{Tool: tool.Name, Installed: entries}, nil
+}
+
+// allToolsListData is `sk list` with no arguments' --format=json
+// shape: one listData per tool that actually has something
+// installed, reusing buildListJSON itself so the all-tools payload
+// can never disagree with what `sk list <tool> --format=json` reports
+// for that same tool individually.
+//
+// Matches printAllToolsList's own text output exactly -- empty tools
+// are excluded from BOTH, not just the human-facing one. An earlier
+// version of this kept JSON complete (every registered tool, empty
+// ones included) on the theory that a script benefits from full
+// enumeration in one call; that didn't hold up: `list`'s job is
+// showing what's INSTALLED, that's true regardless of output format,
+// and sk already has a dedicated, correct place for "what does sk
+// support, installed or not" -- `sk tools --format=json`. Keeping
+// this one complete too would just be the same data reachable two
+// different ways, at the cost of text and JSON silently answering two
+// different questions under one command name.
+type allToolsListData struct {
+	Tools []listData `json:"tools"`
+}
+
+// buildAllToolsListJSON mirrors printAllToolsList's own filtering
+// exactly (same sortedTools() order, same "skip anything with zero
+// installed" rule) -- see allToolsListData's doc comment for why.
+func buildAllToolsListJSON() *allToolsListData {
+	tools := make([]listData, 0, len(tooldef.Registry))
+	for _, tool := range sortedTools() {
+		data, jerr := buildListJSON(tool.Name)
+		if jerr != nil {
+			// Genuinely unreachable given the loop is driven by
+			// tooldef.Registry itself, but handled explicitly rather
+			// than silently dropping a tool from the payload.
+			data = &listData{Tool: tool.Name, Installed: []listInstalledEntry{}}
+		}
+		if len(data.Installed) == 0 {
+			continue
+		}
+		tools = append(tools, *data)
+	}
+	return &allToolsListData{Tools: tools}
 }

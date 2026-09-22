@@ -291,3 +291,223 @@ func TestBuildListJSON_SingleVendorToolAlwaysReportsNilVendor(t *testing.T) {
 		t.Errorf("expected nil vendor for single-vendor maven, got %v", *data.Installed[0].Vendor)
 	}
 }
+
+// TestBuildAllToolsListJSON_OnlyIncludesToolsWithSomethingInstalled
+// confirms JSON filters exactly like the plain-text path -- an
+// earlier version of this test (and the code) expected every
+// registered tool regardless of install state; see
+// allToolsListData's own doc comment for why that was reversed.
+func TestBuildAllToolsListJSON_OnlyIncludesToolsWithSomethingInstalled(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	// Deliberately nothing installed for maven/gradle/kafka/node.
+
+	data := buildAllToolsListJSON()
+	if len(data.Tools) != 1 {
+		t.Fatalf("expected exactly 1 tool (java), got %d: %+v", len(data.Tools), data.Tools)
+	}
+	if data.Tools[0].Tool != "java" {
+		t.Errorf("expected java, got %q", data.Tools[0].Tool)
+	}
+}
+
+func TestBuildAllToolsListJSON_NothingInstalledAnywhereIsEmptyArray(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	data := buildAllToolsListJSON()
+	if data.Tools == nil {
+		t.Error("expected a non-nil (empty) slice, got nil -- would serialize as JSON null instead of []")
+	}
+	if len(data.Tools) != 0 {
+		t.Errorf("expected zero tools, got %d: %+v", len(data.Tools), data.Tools)
+	}
+}
+
+// TestBuildAllToolsListJSON_MatchesPerToolBuildListJSON is the
+// consistency guarantee: an installed version's isCurrent/isDefault
+// reported via the all-tools call must be identical to calling
+// buildListJSON for that one tool directly -- they share the same
+// underlying function, so this also guards against a future edit
+// accidentally forking the two.
+func TestBuildAllToolsListJSON_MatchesPerToolBuildListJSON(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	tool, _ := tooldef.Get("java")
+	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-temurin")
+	t.Setenv(tool.EnvVar, tool.HomePath(dir))
+
+	all := buildAllToolsListJSON()
+	direct, jerr := buildListJSON("java")
+	if jerr != nil {
+		t.Fatalf("expected success, got error: %+v", jerr)
+	}
+
+	var javaFromAll *listData
+	for i := range all.Tools {
+		if all.Tools[i].Tool == "java" {
+			javaFromAll = &all.Tools[i]
+		}
+	}
+	if javaFromAll == nil {
+		t.Fatal("expected a java entry in the all-tools payload")
+	}
+	if len(javaFromAll.Installed) != len(direct.Installed) {
+		t.Fatalf("expected matching entry counts, got %d vs %d", len(javaFromAll.Installed), len(direct.Installed))
+	}
+	a, b := javaFromAll.Installed[0], direct.Installed[0]
+	sameVendor := (a.Vendor == nil && b.Vendor == nil) || (a.Vendor != nil && b.Vendor != nil && *a.Vendor == *b.Vendor)
+	if a.Version != b.Version || !sameVendor || a.IsDefault != b.IsDefault || a.IsCurrent != b.IsCurrent {
+		t.Errorf("expected the all-tools java entry to match the direct call exactly, got %+v vs %+v", a, b)
+	}
+}
+
+// TestPrintAllToolsList_SkipsEmptyToolsEntirely confirms the current,
+// correct behavior: a tool with nothing installed does NOT get its
+// own header or message -- only tools with at least one real version
+// (managed or external) appear. See printAllToolsList's own doc
+// comment for why an earlier version of this test (and the code)
+// showed every registered tool instead.
+func TestPrintAllToolsList_SkipsEmptyToolsEntirely(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	// Deliberately nothing installed for maven/gradle/kafka/node.
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = printAllToolsList()
+	})
+	if runErr != nil {
+		t.Fatalf("expected success, got: %v", runErr)
+	}
+	if !strings.Contains(out, "JDK:") {
+		t.Errorf("expected a Java section header, got: %q", out)
+	}
+	if !strings.Contains(out, "21.0.2-temurin") {
+		t.Errorf("expected java's installed version listed, got: %q", out)
+	}
+	if strings.Contains(out, "Maven:") || strings.Contains(out, "Gradle:") || strings.Contains(out, "Kafka:") {
+		t.Errorf("expected empty tools to be entirely absent, got: %q", out)
+	}
+}
+
+// TestPrintAllToolsList_NothingInstalledAnywhereShowsOneMessage
+// confirms the fresh-install case: no per-tool sections at all, one
+// short message pointing at `sk install`/`sk tools` instead.
+func TestPrintAllToolsList_NothingInstalledAnywhereShowsOneMessage(t *testing.T) {
+	setTestHome(t, t.TempDir())
+
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = printAllToolsList()
+	})
+	if runErr != nil {
+		t.Fatalf("expected success, got: %v", runErr)
+	}
+	if !strings.Contains(out, "Nothing installed yet") {
+		t.Errorf("expected the empty-state message, got: %q", out)
+	}
+	if !strings.Contains(out, "sk install <tool>") || !strings.Contains(out, "sk tools") {
+		t.Errorf("expected pointers to both sk install and sk tools, got: %q", out)
+	}
+	if strings.Contains(out, "JDK:") {
+		t.Errorf("expected no tool headers at all in the empty case, got: %q", out)
+	}
+}
+
+// TestPrintAllToolsList_EndsWithNarrowingTip confirms the closing
+// hint pointing at `sk list <tool>`, shown only when something was
+// actually printed (the empty-state message has its own, different
+// pointers and doesn't need this too).
+func TestPrintAllToolsList_EndsWithNarrowingTip(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+
+	out := captureStdout(t, func() {
+		if err := printAllToolsList(); err != nil {
+			t.Fatalf("expected success, got: %v", err)
+		}
+	})
+	if !strings.Contains(out, "sk list <tool>") {
+		t.Errorf("expected the narrowing tip, got: %q", out)
+	}
+}
+
+// TestPrintAllToolsList_ToolOrderMatchesSortedTools confirms the
+// presentation order among tools that DO appear is the same
+// deliberate one doctor already uses (Java, then Maven, then Gradle)
+// -- not alphabetical, not registration order.
+func TestPrintAllToolsList_ToolOrderMatchesSortedTools(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	installFakeMaven(t, home, "3.9.9")
+	installFakeGradle(t, home, "8.5")
+
+	out := captureStdout(t, func() {
+		if err := printAllToolsList(); err != nil {
+			t.Fatalf("expected success, got: %v", err)
+		}
+	})
+	javaIdx := strings.Index(out, "JDK:")
+	mavenIdx := strings.Index(out, "Maven:")
+	gradleIdx := strings.Index(out, "Gradle:")
+	if javaIdx == -1 || mavenIdx == -1 || gradleIdx == -1 {
+		t.Fatalf("expected all three tool headers present, got: %q", out)
+	}
+	if !(javaIdx < mavenIdx && mavenIdx < gradleIdx) {
+		t.Errorf("expected Java, then Maven, then Gradle order, got indices: java=%d maven=%d gradle=%d", javaIdx, mavenIdx, gradleIdx)
+	}
+}
+
+// TestListCmd_NoArgsDispatchesToPrintAllToolsList confirms the cobra
+// wiring: `sk list` with zero args reaches the all-tools path, and
+// `sk list <tool>` is completely unaffected.
+func TestListCmd_NoArgsDispatchesToPrintAllToolsList(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+	installFakeMaven(t, home, "3.9.9")
+
+	var runErr error
+	out := captureStdout(t, func() {
+		cmd := newListCmd()
+		runErr = cmd.RunE(cmd, []string{})
+	})
+	if runErr != nil {
+		t.Fatalf("expected success, got: %v", runErr)
+	}
+	if !strings.Contains(out, "JDK:") || !strings.Contains(out, "Maven:") {
+		t.Errorf("expected both installed tools' sections, got: %q", out)
+	}
+}
+
+func TestListCmd_NoArgsJSONReturnsAllToolsPayload(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	installFakeJava(t, home, "21.0.2-temurin")
+
+	oldFormat := outputFormat
+	outputFormat = FormatJSON
+	defer func() { outputFormat = oldFormat }()
+
+	var runErr error
+	out := captureStdout(t, func() {
+		cmd := newListCmd()
+		runErr = cmd.RunE(cmd, []string{})
+	})
+	if runErr != nil {
+		t.Fatalf("expected success, got: %v", runErr)
+	}
+	if !strings.Contains(out, `"status":"ok"`) {
+		t.Errorf("expected a success envelope, got: %q", out)
+	}
+	if !strings.Contains(out, `"tools":[`) {
+		t.Errorf("expected the tools array key, got: %q", out)
+	}
+	if !strings.Contains(out, `"tool":"java"`) {
+		t.Errorf("expected java's entry present, got: %q", out)
+	}
+}
