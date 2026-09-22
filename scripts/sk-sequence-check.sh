@@ -1193,6 +1193,72 @@ unset JAVA_HOME MAVEN_HOME GRADLE_HOME
 rm -f "$TEST_HOME/.skrc"
 
 # ════════════════════════════════════════════════════════════════
+section "Q. 'sk doctor fix' -- auto-fixing what's safe, hinting the rest"
+# ════════════════════════════════════════════════════════════════
+cd "$TEST_HOME"
+rm -f "$TEST_HOME/.skrc"
+unset JAVA_HOME MAVEN_HOME GRADLE_HOME
+
+step "Q1. Set up one of each fixable problem, confirm 'sk doctor' (report only) finds all four"
+ln -s /nonexistent-target "$CANDIDATES/JDK-88.0.0"
+mkdir -p "$TEST_HOME/.sdkkeeper/defaults"
+echo "77.0.0-temurin" > "$TEST_HOME/.sdkkeeper/defaults/java"
+mkdir -p "$CANDIDATES/JDK-66.0.0-temurin/bin"
+rmdir "$CANDIDATES/JDK-66.0.0-temurin/bin"
+mkdir -p "$TEST_HOME/.sdkkeeper/tmp/extract-leftover"
+capture_sk_direct doctor
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "1 dangling registration found" "the dangling symlink is reported"
+assert_contains "$SK_OUT" "1 incomplete install found" "the empty-bin install is reported"
+assert_contains "$SK_OUT" "1 stale default found" "the stale default is reported"
+assert_contains "$SK_OUT" "1 leftover temp directory found" "the leftover temp dir is reported"
+assert_exit_code "$SK_EXIT" "1" "doctor exits non-zero when problems are found"
+assert_true "$([[ -d "$CANDIDATES/JDK-66.0.0-temurin" ]] && echo true || echo false)" \
+    "'sk doctor' alone never mutates anything -- the broken directory is still there"
+
+step "Q2. 'sk doctor fix' actually fixes the mechanical ones, reports the rest as still-needed"
+capture_sk_direct doctor fix
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "Fixed: JDK 88.0.0" "the dangling registration was fully fixed"
+assert_contains "$SK_OUT" "Fixed (partly): JDK 66.0.0-temurin" "the incomplete install was partly fixed"
+assert_contains "$SK_OUT" "sk install java 66.0.0-temurin" "the residual reinstall hint names the exact command"
+assert_contains "$SK_OUT" "Fixed (partly): JDK's default" "the stale default was partly fixed"
+assert_contains "$SK_OUT" "sk default java <version>" "the residual set-new-default hint is shown"
+assert_contains "$SK_OUT" "Fixed: $TEST_HOME/.sdkkeeper/tmp/extract-leftover" "the leftover temp dir was fully fixed"
+assert_exit_code "$SK_EXIT" "1" "still exits non-zero -- 2 issues still need manual attention"
+assert_true "$([[ ! -e "$CANDIDATES/JDK-88.0.0" ]] && echo true || echo false)" \
+    "the dangling symlink is genuinely gone from disk"
+assert_true "$([[ ! -d "$CANDIDATES/JDK-66.0.0-temurin" ]] && echo true || echo false)" \
+    "the broken install directory is genuinely gone from disk"
+assert_true "$([[ ! -d "$TEST_HOME/.sdkkeeper/tmp/extract-leftover" ]] && echo true || echo false)" \
+    "the leftover temp directory is genuinely gone from disk"
+
+step "Q3. Re-running 'sk doctor' confirms all four structured checks are now clean"
+capture_sk_direct doctor
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "No dangling registrations" "confirmed clean after fix"
+assert_contains "$SK_OUT" "No incomplete installs" "confirmed clean after fix"
+assert_contains "$SK_OUT" "No stale defaults" "confirmed clean after fix (default was cleared, not reset)"
+assert_contains "$SK_OUT" "No leftover temp directories" "confirmed clean after fix"
+
+step "Q4. --format=json: a fresh mixed batch reports fixed/summary correctly"
+ln -s /nonexistent-target-2 "$CANDIDATES/JDK-55.0.0"
+mkdir -p "$TEST_HOME/.sdkkeeper/tmp/extract-leftover-2"
+capture_sk_direct --format=json doctor fix
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" '"status":"ok"' "the envelope is status:ok even though fixing happened"
+assert_contains "$SK_OUT" '"fixed":2' "summary.fixed counts both real fixes"
+assert_contains "$SK_OUT" '"needsAttention":0' "nothing needed manual attention this time -- both were fully fixable"
+assert_exit_code "$SK_EXIT" "0" "exit 0 -- fully resolved, nothing left needing attention"
+
+step "Q5. 'sk doctor fix' on an already-clean state reports nothing to do"
+capture_sk_direct doctor fix
+assert_contains "$SK_OUT" "Nothing to fix" "plainly reports there was nothing to do"
+assert_exit_code "$SK_EXIT" "0" "clean exit when there's nothing to fix"
+
+rm -f "$TEST_HOME/.sdkkeeper/defaults/java"
+
+# ════════════════════════════════════════════════════════════════
 section "Summary"
 # ════════════════════════════════════════════════════════════════
 print ""

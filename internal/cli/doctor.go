@@ -20,11 +20,28 @@ import (
 type doctorIssue struct {
 	warning bool // cosmetic/safe-to-ignore vs. an actual failure
 	message string
-	fix     string // optional
+	fix     string // full manual instructions -- shown as-is in plain `sk doctor`, unaffected by fix/autofix below
+
+	// autofix is nil for anything `sk doctor fix` can't safely
+	// automate at all (currently just vendor reachability, which
+	// isn't even a doctorIssue -- see printVendorReachability). Where
+	// present, it performs ONLY the safe, mechanical part of `fix`
+	// above -- e.g. deleting a broken directory, never a network call
+	// or a judgment call like picking a new default version.
+	autofix func() error
+
+	// residualHint is what's still left to do by hand after a
+	// SUCCESSFUL autofix -- empty means autofix fully resolves the
+	// issue. Deliberately separate from `fix`: `fix` must stay
+	// complete and correct for someone who only ever runs plain
+	// `sk doctor` and never `fix` (e.g. incomplete installs' `fix`
+	// still says "remove and reinstall", covering the step autofix
+	// will have already done).
+	residualHint string
 }
 
 func newDoctorCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check SDK Keeper's own managed state for problems",
 		Args:  requireArgs(cobra.NoArgs),
@@ -58,6 +75,109 @@ func newDoctorCmd() *cobra.Command {
 			return fmt.Errorf("%d problems found", total)
 		},
 	}
+	cmd.AddCommand(newDoctorFixCmd())
+	return cmd
+}
+
+// newDoctorFixCmd is `sk doctor fix` -- a real subcommand, not a
+// --fix flag, matching sk's own established vocabulary: a positional
+// word names a distinct action (see `sk init skrc`/`sk remove skrc`'s
+// identical reasoning), a flag names a MODE of the same one (like
+// --format). Fixing is a different action from reporting, not a mode
+// of it.
+//
+// Only ever performs the safe, mechanical part of what `sk doctor`
+// already reports -- see each doctorIssue's own autofix field for
+// exactly what that is per check. Never attempts a network call or a
+// judgment call (picking a version, choosing a new default) on the
+// user's behalf; those stay manual, reported as a residual hint.
+func newDoctorFixCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "fix",
+		Short: "Auto-fix what sk doctor can safely fix on its own; report the rest",
+		Args:  requireArgs(cobra.NoArgs),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if outputFormat == FormatJSON {
+				data := buildDoctorFixJSON()
+				return emitDoctorFixJSON(data)
+			}
+			return runDoctorFix()
+		},
+	}
+}
+
+// runDoctorFix re-runs the same four structured checks doctor's own
+// report uses (so it can never find something different from what
+// `sk doctor` just told the user about), and for every issue with a
+// non-nil autofix, runs it -- reporting fixed / still-needs-attention
+// / failed-to-fix per issue. Vendor reachability isn't a doctorIssue
+// at all (see printVendorReachability) and has nothing fixable about
+// it, so it's not part of this command.
+func runDoctorFix() error {
+	fmt.Fprintln(session.Out)
+	fmt.Fprintln(session.Out, styles.Header.Render("Fixing what SDK Keeper can fix on its own..."))
+	fmt.Fprintln(session.Out)
+
+	groups := []struct {
+		singular, plural string
+		issues           []doctorIssue
+	}{
+		{"dangling registration", "dangling registrations", checkDanglingRegistrations()},
+		{"incomplete install", "incomplete installs", checkIncompleteInstalls()},
+		{"stale default", "stale defaults", checkStaleDefaults()},
+		{"leftover temp directory", "leftover temp directories", checkLeftoverTempDirs()},
+	}
+
+	fixed, needsAttention, failed := 0, 0, 0
+	anyIssue := false
+	for _, g := range groups {
+		if len(g.issues) == 0 {
+			fmt.Fprintln(session.Out, styles.Success.Render(fmt.Sprintf("\u2713 No %s", g.plural)))
+			continue
+		}
+		anyIssue = true
+		for _, issue := range g.issues {
+			if issue.autofix == nil {
+				// Nothing here is currently unfixable-but-reported at
+				// the per-issue level (every check that produces
+				// doctorIssue values has an autofix today) -- kept as
+				// a real branch anyway, since a future check might add
+				// an issue with no safe fix at all.
+				fmt.Fprintln(session.Out, styles.Warning.Render("\u26a0 "+issue.message))
+				fmt.Fprintln(session.Out, styles.Detail.Render("    \u2192 "+issue.fix))
+				needsAttention++
+				continue
+			}
+			if err := issue.autofix(); err != nil {
+				fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 Could not fix: %s", issue.message)))
+				fmt.Fprintln(session.Out, styles.Detail.Render(fmt.Sprintf("    \u2192 %s (manual: %s)", err, issue.fix)))
+				failed++
+				continue
+			}
+			fixed++
+			if issue.residualHint == "" {
+				fmt.Fprintln(session.Out, styles.Success.Render("\u2713 Fixed: "+issue.message))
+			} else {
+				fmt.Fprintln(session.Out, styles.Success.Render("\u2713 Fixed (partly): "+issue.message))
+				fmt.Fprintln(session.Out, styles.Detail.Render("    \u2192 still needed: "+issue.residualHint))
+				needsAttention++
+			}
+		}
+	}
+	if !anyIssue {
+		fmt.Fprintln(session.Out)
+		fmt.Fprintln(session.Out, styles.Success.Render("\u2713 Nothing to fix."))
+		return nil
+	}
+
+	fmt.Fprintln(session.Out)
+	fmt.Fprintln(session.Out, styles.Header.Render(fmt.Sprintf(
+		"%d fixed, %d still need attention, %d failed to fix.", fixed, needsAttention, failed,
+	)))
+	if needsAttention > 0 || failed > 0 {
+		return fmt.Errorf("%d issue(s) still need attention", needsAttention+failed)
+	}
+	return nil
 }
 
 // printCheck renders one check's result: "✓ No X" if issues is empty,
@@ -112,9 +232,15 @@ func checkDanglingRegistrations() []doctorIssue {
 				continue
 			}
 			if _, err := os.Stat(v.Path); err != nil {
+				v := v // per-iteration copy for the closure below (Go >=1.22 already does this automatically, but explicit here for clarity)
 				issues = append(issues, doctorIssue{
 					message: fmt.Sprintf("%s %s is registered, but its real target no longer exists", tool.DisplayName, v.Number),
 					fix:     fmt.Sprintf("run `sk remove %s %s` to clear the stale registration", tool.Name, v.Number),
+					// Safe to fully automate: this only ever removes
+					// the dangling SYMLINK itself (v.External), never
+					// the real files it used to point at -- same
+					// guarantee removeVersion already documents.
+					autofix: func() error { return removeVersion(v) },
 				})
 			}
 		}
@@ -139,9 +265,17 @@ func checkIncompleteInstalls() []doctorIssue {
 			}
 			entries, err := os.ReadDir(tool.BinPath(v.Path))
 			if err != nil || len(entries) == 0 {
+				v := v
 				issues = append(issues, doctorIssue{
 					message: fmt.Sprintf("%s %s looks incomplete (missing or empty bin directory)", tool.DisplayName, v.Number),
 					fix:     fmt.Sprintf("run `sk remove %s %s` and reinstall it", tool.Name, v.Number),
+					// Only the removal half is safe to automate --
+					// reinstalling needs a network call and is exactly
+					// the kind of action `sk doctor fix` should never
+					// take without being asked (see install.go's own
+					// download).
+					autofix:      func() error { return removeVersion(v) },
+					residualHint: fmt.Sprintf("reinstall it: `sk install %s %s`", tool.Name, v.Number),
 				})
 			}
 		}
@@ -171,9 +305,15 @@ func checkStaleDefaults() []doctorIssue {
 			}
 		}
 		if !found {
+			tool := tool
 			issues = append(issues, doctorIssue{
 				message: fmt.Sprintf("%s's default (%s) no longer exists", tool.DisplayName, stored),
 				fix:     fmt.Sprintf("run `sk default %s <version>` to set a new one, or `sk default %s null` to clear it", tool.Name, tool.Name),
+				// Clearing a default that points nowhere is always
+				// safe; CHOOSING a new one is a judgment call `sk
+				// doctor fix` can't make for you.
+				autofix:      func() error { return clearDefaultFile(tool) },
+				residualHint: fmt.Sprintf("set a new default if you want one: `sk default %s <version>`", tool.Name),
 			})
 		}
 	}
@@ -192,10 +332,12 @@ func checkLeftoverTempDirs() []doctorIssue {
 
 	var issues []doctorIssue
 	for _, e := range entries {
+		path := filepath.Join(tooldef.TempRoot(), e.Name())
 		issues = append(issues, doctorIssue{
 			warning: true,
-			message: fmt.Sprintf("%s", filepath.Join(tooldef.TempRoot(), e.Name())),
-			fix:     fmt.Sprintf("safe to delete: rm -rf %s", filepath.Join(tooldef.TempRoot(), e.Name())),
+			message: fmt.Sprintf("%s", path),
+			fix:     fmt.Sprintf("safe to delete: rm -rf %s", path),
+			autofix: func() error { return os.RemoveAll(path) },
 		})
 	}
 	return issues
@@ -370,6 +512,90 @@ func emitDoctorJSON(data *doctorData) error {
 	writeJSONEnvelope(jsonEnvelope{SchemaVersion: schemaVersion, Status: "ok", Data: data})
 	if data.Summary.Fail > 0 {
 		return &CLIError{Code: ErrCodeDoctorCheckFailed, Err: fmt.Errorf("%d check(s) failed", data.Summary.Fail)}
+	}
+	return nil
+}
+
+// doctorFixResultJSON is one issue's outcome in `sk doctor fix`'s
+// --format=json payload. Exactly one of Residual/Error is set:
+// Residual on a fixed-but-not-fully-resolved issue (mirrors
+// runDoctorFix's own "Fixed (partly)" case), Error if autofix itself
+// failed (e.g. a permissions problem) -- in which case Fixed is
+// false and the issue's full manual instructions are NOT repeated
+// here (a caller already has them from `sk doctor --format=json`, and
+// the design doc's own #9 rule -- exact, round-trippable data, not
+// duplicated prose -- argues against re-sending them).
+type doctorFixResultJSON struct {
+	Check    string `json:"check"`
+	Message  string `json:"message"`
+	Fixed    bool   `json:"fixed"`
+	Residual string `json:"residual,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type doctorFixSummaryJSON struct {
+	Fixed          int `json:"fixed"`
+	NeedsAttention int `json:"needsAttention"`
+	Failed         int `json:"failed"`
+}
+
+type doctorFixData struct {
+	Results []doctorFixResultJSON `json:"results"`
+	Summary doctorFixSummaryJSON  `json:"summary"`
+}
+
+// buildDoctorFixJSON mirrors runDoctorFix exactly -- same four
+// checkX() calls, same per-issue autofix()/residualHint handling --
+// so the JSON and plain-text outcomes (including what actually got
+// fixed on disk) can never disagree. Genuinely performs each autofix;
+// this is not a dry run.
+func buildDoctorFixJSON() *doctorFixData {
+	groups := []struct {
+		check  string
+		issues []doctorIssue
+	}{
+		{"dangling_registrations", checkDanglingRegistrations()},
+		{"incomplete_installs", checkIncompleteInstalls()},
+		{"stale_defaults", checkStaleDefaults()},
+		{"leftover_temp_dirs", checkLeftoverTempDirs()},
+	}
+
+	results := []doctorFixResultJSON{}
+	var summary doctorFixSummaryJSON
+	for _, g := range groups {
+		for _, issue := range g.issues {
+			if issue.autofix == nil {
+				results = append(results, doctorFixResultJSON{Check: g.check, Message: issue.message, Fixed: false, Residual: issue.fix})
+				summary.NeedsAttention++
+				continue
+			}
+			if err := issue.autofix(); err != nil {
+				results = append(results, doctorFixResultJSON{Check: g.check, Message: issue.message, Fixed: false, Error: err.Error()})
+				summary.Failed++
+				continue
+			}
+			r := doctorFixResultJSON{Check: g.check, Message: issue.message, Fixed: true}
+			if issue.residualHint != "" {
+				r.Residual = issue.residualHint
+				summary.NeedsAttention++
+			}
+			results = append(results, r)
+			summary.Fixed++
+		}
+	}
+	return &doctorFixData{Results: results, Summary: summary}
+}
+
+// emitDoctorFixJSON mirrors emitDoctorJSON's own pattern: the
+// envelope is always status "ok" (fixing what it can and reporting
+// the rest is the successful outcome of this command, not a failure),
+// with a separate *CLIError -- ErrCodeDoctorFixIncomplete, exit 201,
+// shared with ErrCodeDoctorCheckFailed's own "still needs attention"
+// exit code -- only when something remains unfixed or failed to fix.
+func emitDoctorFixJSON(data *doctorFixData) error {
+	writeJSONEnvelope(jsonEnvelope{SchemaVersion: schemaVersion, Status: "ok", Data: data})
+	if data.Summary.NeedsAttention > 0 || data.Summary.Failed > 0 {
+		return &CLIError{Code: ErrCodeDoctorFixIncomplete, Err: fmt.Errorf("%d issue(s) still need attention", data.Summary.NeedsAttention+data.Summary.Failed)}
 	}
 	return nil
 }

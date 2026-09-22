@@ -86,6 +86,14 @@ const (
 	// invocation error, so it's paired with a success envelope (see
 	// emitDoctorJSON).
 	ErrCodeDoctorCheckFailed ErrorCode = "doctor_check_failed"
+	// ErrCodeDoctorFixIncomplete (exit 201): `sk doctor fix` ran
+	// fine, but at least one issue is still unfixed -- either
+	// something only `sk doctor` itself can't safely automate (a
+	// residual hint) or an autofix attempt that genuinely failed
+	// (e.g. a permissions error). Shares its exit code with
+	// ErrCodeDoctorCheckFailed -- same "still needs attention" shape,
+	// distinct string (see emitDoctorFixJSON).
+	ErrCodeDoctorFixIncomplete ErrorCode = "doctor_fix_incomplete"
 	// ErrCodeInvalidPath (exit 105): add's source path doesn't exist,
 	// isn't accessible, or isn't a directory.
 	ErrCodeInvalidPath ErrorCode = "invalid_path"
@@ -162,6 +170,7 @@ var exitCodeTable = map[ErrorCode]int{
 	ErrCodeSkrcAlreadyExists:       106,
 	ErrCodeSkrcBatchPartialFailure: 112,
 	ErrCodeDoctorCheckFailed:       201,
+	ErrCodeDoctorFixIncomplete:     201,
 }
 
 func exitCodeFor(code ErrorCode) int {
