@@ -2,14 +2,6 @@ module sdkkeeper
 
 go 1.24.0
 
-replace golang.org/x/sys => github.com/golang/sys v0.24.0
-
-replace golang.org/x/text => github.com/golang/text v0.16.0
-
-replace golang.org/x/term => github.com/golang/term v0.24.0
-
-replace golang.org/x/sync => github.com/golang/sync v0.7.0
-
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
