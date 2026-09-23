@@ -145,6 +145,30 @@ func withTempProvider(t *testing.T, toolName string, provider registry.Provider)
 	})
 }
 
+// withTempProviders is withTempProvider for a genuinely multi-vendor
+// tool: registers ALL of providers, in order (the same order
+// vendorNamesFor and the vendor picker's own display both follow).
+// withTempProvider (singular) always leaves exactly one provider
+// registered, which silently makes hasSingleVendor true and skips the
+// vendor picker entirely -- the wrong fixture for any test that needs
+// the vendor-picker branch to actually run.
+func withTempProviders(t *testing.T, toolName string, providers ...registry.Provider) {
+	t.Helper()
+	original, hadOriginal := providersByTool[toolName]
+	nps := make([]namedProvider, len(providers))
+	for i, p := range providers {
+		nps[i] = namedProvider{p.Name(), p}
+	}
+	providersByTool[toolName] = nps
+	t.Cleanup(func() {
+		if hadOriginal {
+			providersByTool[toolName] = original
+		} else {
+			delete(providersByTool, toolName)
+		}
+	})
+}
+
 func newFakeInstallServer(t *testing.T, archive []byte) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
