@@ -138,48 +138,99 @@ func resolveVendorAndVersion(ctx context.Context, tool tooldef.Tool) (registry.P
 		))
 		return nil, "", err
 	}
-	chosenMajor, err := picker.Run(session, fmt.Sprintf("Select %s major version", tool.DisplayName), majors, "")
-	if err != nil {
-		fmt.Fprintln(session.Out)
-		fmt.Fprintln(session.Out, styles.Error.Render(err.Error()))
-		return nil, "", err
-	}
-	if chosenMajor == "" {
-		fmt.Fprintln(session.Out)
-		// Styled Detail (neutral), not Error -- see the vendor-picker
-		// case above for the full reasoning.
-		fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("No %s major version selected to install.", tool.DisplayName)))
-		return nil, "", fmt.Errorf("no major version selected")
-	}
 
-	patches, err := provider.ListPatchVersions(ctx, chosenMajor, runtime.GOOS, runtime.GOARCH)
-	if err != nil {
-		if err == registry.ErrVersionNotFound {
+	// Looped, not a single pass: ListMajorVersions (Adoptium's own
+	// /v3/info/available_releases) is NOT filtered by OS/architecture
+	// at all -- it lists every major the vendor has EVER published a
+	// build for, on ANY platform. ListPatchVersions below, right
+	// after a major is chosen, IS filtered by the real
+	// runtime.GOOS/GOARCH. So the major picker can genuinely offer a
+	// major (e.g. a very recent one) that turns out to have zero
+	// releases for THIS platform specifically -- confirmed as a real,
+	// live case, not a hypothetical: Temurin can 404 on a major's
+	// feature_releases endpoint for one platform while other
+	// platforms (or other vendors, for the same major) have it.
+	// Pre-filtering the major list upfront was considered and
+	// rejected: it would mean one extra network call PER candidate
+	// major (there is no cheaper, platform-filtered majors endpoint)
+	// before the picker could even appear, making an already-slow
+	// picker measurably slower for the common case just to guard
+	// against the uncommon one. Looping back with the offending major
+	// removed keeps the common case exactly as fast as before, and
+	// only costs anything extra on the actual dead-end path.
+	for {
+		if len(majors) == 0 {
 			fmt.Fprintln(session.Out)
 			fmt.Fprintln(session.Out, styles.Error.Render(
-				fmt.Sprintf("\u2717 No %s %s releases found for %s/%s via %s", tool.DisplayName, chosenMajor, runtime.GOOS, runtime.GOARCH, provider.Name()),
+				fmt.Sprintf("\u2717 No %s major version has releases for %s/%s via %s", tool.DisplayName, runtime.GOOS, runtime.GOARCH, provider.Name()),
 			))
-			return nil, "", fmt.Errorf("no releases found")
+			return nil, "", fmt.Errorf("no releases found for this platform")
 		}
-		fmt.Fprintln(session.Out)
-		fmt.Fprintln(session.Out, styles.Error.Render(
-			fmt.Sprintf("\u2717 Could not list %s %s versions: %s", tool.DisplayName, chosenMajor, err),
-		))
-		return nil, "", err
-	}
-	chosenPatch, err := picker.Run(session, fmt.Sprintf("Select %s %s minor/patch version", tool.DisplayName, chosenMajor), patches, "")
-	if err != nil {
-		fmt.Fprintln(session.Out)
-		fmt.Fprintln(session.Out, styles.Error.Render(err.Error()))
-		return nil, "", err
-	}
-	if chosenPatch == "" {
-		fmt.Fprintln(session.Out)
-		// Styled Detail (neutral), not Error -- see the vendor-picker
-		// case above for the full reasoning.
-		fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("No %s minor/patch version selected to install.", tool.DisplayName)))
-		return nil, "", fmt.Errorf("no version selected")
-	}
 
-	return provider, chosenPatch, nil
+		chosenMajor, err := picker.Run(session, fmt.Sprintf("Select %s major version", tool.DisplayName), majors, "")
+		if err != nil {
+			fmt.Fprintln(session.Out)
+			fmt.Fprintln(session.Out, styles.Error.Render(err.Error()))
+			return nil, "", err
+		}
+		if chosenMajor == "" {
+			fmt.Fprintln(session.Out)
+			// Styled Detail (neutral), not Error -- see the
+			// vendor-picker case above for the full reasoning.
+			fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("No %s major version selected to install.", tool.DisplayName)))
+			return nil, "", fmt.Errorf("no major version selected")
+		}
+
+		patches, err := provider.ListPatchVersions(ctx, chosenMajor, runtime.GOOS, runtime.GOARCH)
+		if err != nil {
+			if err == registry.ErrVersionNotFound {
+				fmt.Fprintln(session.Out)
+				fmt.Fprintln(session.Out, styles.Warning.Render(fmt.Sprintf(
+					"\u26a0 No %s %s releases for %s/%s via %s -- pick a different major version",
+					tool.DisplayName, chosenMajor, runtime.GOOS, runtime.GOARCH, provider.Name(),
+				)))
+				majors = removeString(majors, chosenMajor)
+				continue
+			}
+			fmt.Fprintln(session.Out)
+			fmt.Fprintln(session.Out, styles.Error.Render(
+				fmt.Sprintf("\u2717 Could not list %s %s versions: %s", tool.DisplayName, chosenMajor, err),
+			))
+			return nil, "", err
+		}
+
+		chosenPatch, err := picker.Run(session, fmt.Sprintf("Select %s %s minor/patch version", tool.DisplayName, chosenMajor), patches, "")
+		if err != nil {
+			fmt.Fprintln(session.Out)
+			fmt.Fprintln(session.Out, styles.Error.Render(err.Error()))
+			return nil, "", err
+		}
+		if chosenPatch == "" {
+			fmt.Fprintln(session.Out)
+			// Styled Detail (neutral), not Error -- see the
+			// vendor-picker case above for the full reasoning.
+			fmt.Fprintln(session.Out, styles.Neutral.Render(fmt.Sprintf("No %s minor/patch version selected to install.", tool.DisplayName)))
+			return nil, "", fmt.Errorf("no version selected")
+		}
+
+		return provider, chosenPatch, nil
+	}
+}
+
+// removeString returns items with the first occurrence of s removed
+// (order of the remaining items preserved). Used by
+// resolveVendorAndVersion to drop a major version from the picker's
+// list once it's confirmed to have no releases for this platform, so
+// the same dead-end can't be picked again on a loop-back.
+func removeString(items []string, s string) []string {
+	out := make([]string, 0, len(items))
+	removed := false
+	for _, item := range items {
+		if !removed && item == s {
+			removed = true
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }

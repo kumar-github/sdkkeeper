@@ -44,7 +44,9 @@ func newDoctorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check SDK Keeper's own managed state for problems",
-		Args:  requireArgs(cobra.NoArgs),
+		Example: `sk doctor        # report only
+  sk doctor fix    # fix what's safe to auto-fix, report the rest`,
+		Args: requireArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if outputFormat == FormatJSON {
 				data := buildDoctorJSON(cmd.Context())
@@ -93,9 +95,10 @@ func newDoctorCmd() *cobra.Command {
 // user's behalf; those stay manual, reported as a residual hint.
 func newDoctorFixCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "fix",
-		Short: "Auto-fix what sk doctor can safely fix on its own; report the rest",
-		Args:  requireArgs(cobra.NoArgs),
+		Use:     "fix",
+		Short:   "Auto-fix what sk doctor can safely fix on its own; report the rest",
+		Example: `sk doctor fix`,
+		Args:    requireArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if outputFormat == FormatJSON {
 				data := buildDoctorFixJSON()

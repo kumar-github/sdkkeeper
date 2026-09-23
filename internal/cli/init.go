@@ -12,6 +12,8 @@ func newInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init <shell|skrc>",
 		Short: "Print shell integration for zsh/nu/powershell, or create .skrc in this directory (sk init skrc)",
+		Example: `eval "$(sk init zsh)"   # in .zshrc -- see 'sk init --help' for nu/powershell
+  sk init skrc              # create .skrc in this directory (see 'sk skrc', 'sk remove skrc')`,
 		Long: `Print shell integration for zsh, nu, or powershell (pwsh is accepted as an alias for powershell) --
 or, with 'sk init skrc', create .skrc in the CURRENT directory from whatever
 tools are currently active in this shell (same convention as 'git init'/'npm

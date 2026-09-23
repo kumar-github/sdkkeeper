@@ -35,9 +35,10 @@ type versionPayload struct {
 // for a local "dev" build.
 func newVersionCmd(version, commit string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "version",
-		Short: "Show sk's own version",
-		Args:  requireArgs(cobra.NoArgs),
+		Use:     "version",
+		Short:   "Show sk's own version",
+		Example: `sk version`,
+		Args:    requireArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if outputFormat == FormatJSON {
 				data := &versionPayload{Version: version}

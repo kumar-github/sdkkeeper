@@ -233,6 +233,20 @@ func newInstallCmd() *cobra.Command {
 			fmt.Fprintln(session.Out, styles.Success.Render(
 				fmt.Sprintf("\u2713 %s %s (%s, %s) installed — run `sk use %s %s` to activate it", tool.DisplayName, version, provider.Name(), formatMB(downloadedBytes), tool.Name, versionLabel),
 			))
+			// Surfaced explicitly, not just performed silently
+			// internally -- installer.Install already verifies this
+			// checksum unconditionally before ever extracting (see
+			// its own package doc comment), so a successful return
+			// here always means it passed; this just makes that fact
+			// visible rather than trusting it happened. Matters more
+			// than usual for sk specifically: its macOS builds are
+			// unsigned (no Apple Developer cert -- see the packaging
+			// notes), so this gives someone a concrete, checkable
+			// fact to point to instead of just hoping the
+			// quarantine-strip workaround isn't cutting a corner.
+			fmt.Fprintln(session.Out, styles.Detail.Render(
+				fmt.Sprintf("  \u2514\u2500 %s checksum verified: %s", checksumAlgorithmDisplayName(asset.ChecksumAlgorithm), asset.Checksum),
+			))
 			return nil
 		},
 	}
@@ -244,12 +258,14 @@ func newInstallCmd() *cobra.Command {
 // caller can confirm what actually landed without a second `sk list`
 // call.
 type installPayload struct {
-	Tool    string  `json:"tool"`
-	Version string  `json:"version"`
-	Vendor  *string `json:"vendor"`
-	Action  string  `json:"action"`
-	Path    string  `json:"path"`
-	Bytes   int64   `json:"bytes"`
+	Tool              string  `json:"tool"`
+	Version           string  `json:"version"`
+	Vendor            *string `json:"vendor"`
+	Action            string  `json:"action"`
+	Path              string  `json:"path"`
+	Bytes             int64   `json:"bytes"`
+	Checksum          string  `json:"checksum"`
+	ChecksumAlgorithm string  `json:"checksumAlgorithm"`
 }
 
 // resolveInstallJSON is install's --format=json counterpart: no
@@ -311,13 +327,34 @@ func resolveInstallJSON(ctx context.Context, toolName, arg string) (*installPayl
 	}
 
 	return &installPayload{
-		Tool:    tool.Name,
-		Version: version,
-		Vendor:  vendorPtr(tool.Name, provider.Name()),
-		Action:  string(actionInstalled),
-		Path:    targetDir,
-		Bytes:   downloadedBytes,
+		Tool:              tool.Name,
+		Version:           version,
+		Vendor:            vendorPtr(tool.Name, provider.Name()),
+		Action:            string(actionInstalled),
+		Path:              targetDir,
+		Bytes:             downloadedBytes,
+		Checksum:          asset.Checksum,
+		ChecksumAlgorithm: checksumAlgorithmDisplayName(asset.ChecksumAlgorithm),
 	}, nil
+}
+
+// checksumAlgorithmDisplayName maps registry.SHA256/registry.SHA1's
+// internal, lowercase-no-hyphen spelling ("sha256", "sha1") to the
+// conventional display form ("SHA-256", "SHA-1") shown to the user --
+// both in the plain-text confirmation line and in --format=json's own
+// checksumAlgorithm field, so the two can never show a differently-
+// spelled algorithm name for the exact same install. Falls back to
+// uppercasing whatever string it's given for any future algorithm
+// this doesn't yet recognize, rather than hiding it.
+func checksumAlgorithmDisplayName(alg string) string {
+	switch alg {
+	case registry.SHA256:
+		return "SHA-256"
+	case registry.SHA1:
+		return "SHA-1"
+	default:
+		return strings.ToUpper(alg)
+	}
 }
 
 // classifyInstallErr maps installer.Install's error into the right

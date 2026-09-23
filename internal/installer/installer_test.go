@@ -152,6 +152,71 @@ func TestInstall_Success(t *testing.T) {
 	}
 }
 
+// TestInstall_SurvivesTempRootRemovedByConcurrentInstall is the
+// regression test for a real, reported bug: two `sk install`
+// processes sharing the same TempRoot (~/.sdkkeeper/tmp) race on the
+// end-of-install "remove TempRoot if now empty" cleanup -- if that
+// fires in the narrow window between THIS process's own retry
+// attempts, the next attempt's os.CreateTemp call used to fail
+// outright with "creating temp file: ... no such file or directory".
+// Reproduced deterministically here (not left to real goroutine
+// timing, which wouldn't reliably hit the window) by removing
+// TempRoot from inside the Progress callback, exactly when it
+// announces a retry -- the same moment a concurrent process's own
+// cleanup could plausibly land.
+func TestInstall_SurvivesTempRootRemovedByConcurrentInstall(t *testing.T) {
+	goodArchive, goodChecksum := buildTarGz(t, "jdk-21.0.2+13", map[string]string{"bin/java": "real content"})
+	badArchive := []byte("wrong content, forces a retry")
+
+	attempt := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.Write(badArchive)
+			return
+		}
+		w.Write(goodArchive)
+	}))
+	defer server.Close()
+
+	tmpRoot := t.TempDir()
+	targetDir := filepath.Join(tmpRoot, "candidates", "java", "JDK-21.0.2-temurin")
+	tempRoot := filepath.Join(tmpRoot, "tmp")
+
+	err := Install(context.Background(), Options{
+		URL:         server.URL,
+		Filename:    "archive.tar.gz",
+		Checksum:    goodChecksum,
+		TargetDir:   targetDir,
+		TempRoot:    tempRoot,
+		MaxAttempts: 3,
+		RetryDelay:  time.Millisecond,
+		Progress: func(msg string) {
+			if strings.Contains(msg, "Retrying") {
+				// Simulates a CONCURRENT `sk install` process's own
+				// end-of-install cleanup removing the shared TempRoot
+				// in exactly this window -- real, not a mock: the
+				// directory genuinely no longer exists on disk when
+				// the next attempt's CreateTemp call runs.
+				if err := os.RemoveAll(tempRoot); err != nil {
+					t.Fatalf("setup failed: %v", err)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected the install to survive TempRoot being removed mid-retry, got: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("expected exactly 2 attempts (1 forced failure + 1 success), got %d", attempt)
+	}
+
+	content, err := os.ReadFile(filepath.Join(targetDir, "bin", "java"))
+	if err != nil || string(content) != "real content" {
+		t.Fatalf("expected a real, successful install despite the race, got content=%q err=%v", content, err)
+	}
+}
+
 // TestRunWithThresholdedProgress_FastWorkStaysSilent confirms onSlow
 // is NOT called when work finishes well before the threshold -- the
 // common case (e.g. a normal, sub-second extraction), where a status

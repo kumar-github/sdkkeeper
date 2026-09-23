@@ -43,6 +43,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -354,9 +355,23 @@ func (p *progressReader) Read(b []byte) (int, error) {
 // is still running after threshold -- a fast operation stays silent,
 // a slow one gets a timely status message instead of a silent gap.
 // The timer stops as soon as work finishes, whichever comes first.
+//
+// Waits for its own timer goroutine to fully exit before returning
+// (via the WaitGroup below), rather than returning as soon as work()
+// itself finishes -- a real, confirmed data race otherwise: when the
+// timer branch fires (onSlow gets called), that goroutine's write of
+// whatever onSlow touches has NO happens-before relationship with
+// code that runs after this function returns, since the only
+// synchronization in play (the done channel) is never actually
+// received on that branch. Caught by `go test -race`, not by
+// inspection -- the failure mode is invisible under a plain `go test`
+// even though the underlying ordering guarantee is genuinely missing.
 func runWithThresholdedProgress(threshold time.Duration, onSlow func(), work func() error) error {
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		select {
 		case <-time.After(threshold):
 			if onSlow != nil {
@@ -368,6 +383,7 @@ func runWithThresholdedProgress(threshold time.Duration, onSlow func(), work fun
 
 	err := work()
 	close(done)
+	wg.Wait()
 	return err
 }
 
@@ -504,6 +520,45 @@ func downloadOnce(ctx context.Context, opts Options, resumePath string) (path st
 			return "", "", fmt.Errorf("unexpected status %d", resp.StatusCode)
 		}
 		f, err = os.CreateTemp(opts.TempRoot, "download-*")
+		if err != nil {
+			// TempRoot itself may have vanished since Install's own
+			// one-time MkdirAll -- a CONCURRENT `sk install` in
+			// another tab/process shares this exact directory, and
+			// its own end-of-install cleanup (see Install's deferred
+			// "remove TempRoot if now empty") can race with this
+			// process's own retry loop: if it observes TempRoot empty
+			// in the narrow window between this process's own
+			// attempts, it removes the shared directory, and every
+			// later CreateTemp call here would otherwise fail
+			// outright with a confusing "no such file or directory"
+			// -- a real, reported failure, reproduced deterministically
+			// in TestInstall_SurvivesTempRootRemovedByConcurrentInstall
+			// (which removes TempRoot from inside the Progress
+			// callback at the exact moment a concurrent process's own
+			// cleanup could land), not just reasoned about. Self-healing
+			// here (recreate, then retry the create once) means each
+			// attempt survives that race regardless of what any other
+			// process does to TempRoot in between, without needing to
+			// remove the cosmetic cleanup that causes it.
+			//
+			// NOTE: the analogous os.MkdirTemp call for the extraction
+			// directory later in Install does NOT need this same
+			// treatment -- by the time that runs, this process's own
+			// downloaded archive file is still sitting inside TempRoot
+			// (removed only via defer, at the very end), so the
+			// cleanup's own "only remove if truly empty" guard can
+			// never fire during that window. Confirmed by writing the
+			// equivalent fix and test for that call site first: the
+			// test failed for a DIFFERENT reason after the fix
+			// (extraction correctly failing because a deliberately-
+			// deleted archive file was, correctly, gone) rather than
+			// reproducing the original bug, which is what led to
+			// dropping that speculative fix rather than keeping
+			// unverified code around.
+			if mkdirErr := os.MkdirAll(opts.TempRoot, 0o755); mkdirErr == nil {
+				f, err = os.CreateTemp(opts.TempRoot, "download-*")
+			}
+		}
 		if err != nil {
 			return "", "", fmt.Errorf("creating temp file: %w", err)
 		}

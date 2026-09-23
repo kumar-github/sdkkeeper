@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"sdkkeeper/internal/registry"
@@ -186,6 +187,12 @@ func TestResolveInstallJSON_RealDownloadInstallsAndReportsInstalled(t *testing.T
 	if data.Bytes != int64(len(archive)) {
 		t.Errorf("expected bytes=%d, got %d", len(archive), data.Bytes)
 	}
+	if data.Checksum != checksum {
+		t.Errorf("expected checksum=%q, got %q", checksum, data.Checksum)
+	}
+	if data.ChecksumAlgorithm != "SHA-256" {
+		t.Errorf("expected checksumAlgorithm=SHA-256 (display form, not the raw registry.SHA256 constant), got %q", data.ChecksumAlgorithm)
+	}
 
 	kafka := mustTool(t, "kafka")
 	wantPath := filepath.Join(kafka.CandidateRoot(), kafka.FolderPrefix+"1.0.0")
@@ -219,6 +226,64 @@ func TestResolveInstallJSON_ChecksumMismatchIsChecksumMismatch(t *testing.T) {
 	_, jerr := resolveInstallJSON(context.Background(), "kafka", "2.0.0")
 	if jerr == nil || jerr.Code != ErrCodeChecksumMismatch {
 		t.Fatalf("expected checksum_mismatch, got: %+v", jerr)
+	}
+}
+
+// TestChecksumAlgorithmDisplayName confirms the raw registry constant
+// spellings map to their conventional display form, and that an
+// unrecognized future algorithm still shows SOMETHING (uppercased)
+// rather than silently disappearing.
+func TestChecksumAlgorithmDisplayName(t *testing.T) {
+	cases := map[string]string{
+		registry.SHA256: "SHA-256",
+		registry.SHA1:   "SHA-1",
+		"sha512":        "SHA512", // unrecognized -- falls back to a plain uppercase of whatever it's given
+	}
+	for input, want := range cases {
+		if got := checksumAlgorithmDisplayName(input); got != want {
+			t.Errorf("checksumAlgorithmDisplayName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// TestInstallCmd_TextModeShowsChecksumVerifiedLine is the real,
+// end-to-end confirmation for the plain-text path specifically
+// (resolveInstallJSON's own test above already covers the JSON
+// payload's Checksum/ChecksumAlgorithm fields, but that's a different
+// code path from the interactive RunE's fmt.Fprintln call) -- a real
+// download against a real fake server, through the actual command,
+// not just an inference that the same data must be right because the
+// JSON path is.
+func TestInstallCmd_TextModeShowsChecksumVerifiedLine(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	archive, checksum := buildFakeTarGz(t)
+	server := newFakeInstallServer(t, archive)
+	withTempProvider(t, "kafka", &fakeInstallProvider{
+		name: "apache",
+		asset: registry.Asset{
+			URL:               server.URL,
+			Filename:          "fake-1.0.0.tar.gz",
+			Checksum:          checksum,
+			ChecksumAlgorithm: registry.SHA256,
+		},
+	})
+
+	var runErr error
+	out := withSession(t, func() {
+		cmd := newInstallCmd()
+		cmd.SetContext(context.Background())
+		runErr = cmd.RunE(cmd, []string{"kafka", "1.0.0"})
+	})
+	if runErr != nil {
+		t.Fatalf("expected a successful install, got: %v", runErr)
+	}
+	if !strings.Contains(out, "installed") {
+		t.Fatalf("expected the usual install-succeeded line, got: %q", out)
+	}
+	if !strings.Contains(out, "SHA-256 checksum verified: "+checksum) {
+		t.Errorf("expected the checksum-verified line with the real hash, got: %q", out)
 	}
 }
 

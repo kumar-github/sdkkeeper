@@ -69,7 +69,7 @@ homebrew_casks:
       token: "{{ .Env.PACKAGING_REPO_TOKEN }}"
     homepage: "https://github.com/kumar-github/sdkkeeper"
     description: "SDK Keeper -- explicit, no-default SDK version manager"
-    # TODO: set a real license once one exists in the repo.
+    license: "Apache-2.0"
     #
     # Real `caveats do ... end` / `postflight_steps do ... end` blocks,
     # not the simpler `caveats:`/`hooks:` YAML fields -- those either
