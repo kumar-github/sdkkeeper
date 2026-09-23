@@ -47,7 +47,7 @@ func newToolsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "tools",
 		Short:   "List every tool SDK Keeper knows how to manage",
-		Example: `sk tools   # see 'sk install <tool>' or 'sk search <tool> <vendor>' next`,
+		Example: `  sk tools   # see 'sk install <tool>' or 'sk search <tool> <vendor>' next`,
 		Args:    requireArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if outputFormat == FormatJSON {

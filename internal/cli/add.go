@@ -14,7 +14,7 @@ func newAddCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add <tool> <version> <path>",
 		Short: "Register an existing install (not managed by SDK Keeper) under a version label",
-		Example: `sk add java 21.0.2 ~/MyApps/JAVA/JDK-21.0.2
+		Example: `  sk add java 21.0.2 ~/MyApps/JAVA/JDK-21.0.2
   sk add maven 3.9.14 ~/MyApps/APACHE-MAVEN/apache-maven-3.9.14`,
 		Args: requireArgs(cobra.ExactArgs(3)),
 		RunE: func(cmd *cobra.Command, args []string) error {

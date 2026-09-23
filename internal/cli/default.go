@@ -17,7 +17,7 @@ func newDefaultCmd() *cobra.Command {
 		Short: "Set, show, or clear the remembered default version for a tool",
 		Example: `  sk default java 21.0.2-temurin   # set
   sk default java                    # show current
-  sk default java null                # clear`,
+  sk default java null               # clear`,
 		Args: requireArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]

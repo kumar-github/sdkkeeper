@@ -37,7 +37,3 @@ require (
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
 )
-
-replace gopkg.in/yaml.v3 => github.com/go-yaml/yaml v3.0.1+incompatible
-
-replace gopkg.in/check.v1 => github.com/go-check/check v0.0.0-20180628173108-788fd7840127

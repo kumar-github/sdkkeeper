@@ -33,7 +33,7 @@ func newInstallCmd() *cobra.Command {
 		Short: "Download and install a new version of a tool",
 		Example: `  sk install java 21.0.2-temurin    # exact version+vendor, no pickers
   sk install java 21.0.2-liberica   # exact version+vendor, no pickers
-  sk install java                    # vendor picker, then major picker, then patch picker`,
+  sk install java                   # vendor picker, then major picker, then patch picker`,
 		Args: requireArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			toolName := args[0]
