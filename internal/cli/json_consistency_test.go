@@ -25,7 +25,7 @@ func TestJSONConsistency_ListCurrentAgreesWithCurrentCommand(t *testing.T) {
 	activeDir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"17.0.9-liberica")
 	t.Setenv(tool.EnvVar, tool.HomePath(activeDir))
 
-	listData, jerr := buildListJSON("java")
+	listData, jerr := buildListJSON("java", false)
 	if jerr != nil {
 		t.Fatalf("list failed: %+v", jerr)
 	}
@@ -73,7 +73,7 @@ func TestJSONConsistency_NothingActiveAgreesAcrossBoth(t *testing.T) {
 	installFakeJava(t, home, "21.0.2-temurin")
 	os.Unsetenv("JAVA_HOME")
 
-	listData, jerr := buildListJSON("java")
+	listData, jerr := buildListJSON("java", false)
 	if jerr != nil {
 		t.Fatalf("list failed: %+v", jerr)
 	}
@@ -106,7 +106,7 @@ func TestJSONConsistency_SearchIsInstalledAgreesWithListInstalledSet(t *testing.
 	installFakeJava(t, home, "21.0.2-temurin")
 	tool, _ := tooldef.Get("java")
 
-	listData, jerr := buildListJSON("java")
+	listData, jerr := buildListJSON("java", false)
 	if jerr != nil {
 		t.Fatalf("list failed: %+v", jerr)
 	}

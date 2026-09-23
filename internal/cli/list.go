@@ -13,13 +13,23 @@ import (
 )
 
 func newListCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list [<tool>]",
 		Short: "Show installed versions of a tool, or every tool",
-		Example: `  sk list java   # just java
-  sk list        # every registered tool, one section each`,
+		Example: `  sk list java           # just java
+  sk list                # every registered tool, one section each
+  sk list --sizes        # same, plus real on-disk size per version`,
 		Args: requireArgs(cobra.RangeArgs(0, 1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Not computed unless asked: real disk usage means
+			// walking every file in every installed version's own
+			// directory tree (a JDK is hundreds of files) -- a
+			// materially heavier operation than list's own normal,
+			// cheap os.ReadDir-only scan. Making it opt-in keeps the
+			// common "just show me what's installed" case exactly as
+			// fast as it's always been.
+			showSizes, _ := cmd.Flags().GetBool("sizes")
+
 			// No tool name given -- show every registered tool, one
 			// section each, rather than requiring N separate calls.
 			// Deliberately NOT a --all-tools flag: sk's own vocabulary
@@ -29,15 +39,15 @@ func newListCmd() *cobra.Command {
 			// zero-arg .skrc-batch case), never a flag for that.
 			if len(args) == 0 {
 				if outputFormat == FormatJSON {
-					return emitJSON(buildAllToolsListJSON(), nil)
+					return emitJSON(buildAllToolsListJSON(showSizes), nil)
 				}
-				return printAllToolsList()
+				return printAllToolsList(showSizes)
 			}
 			toolName := args[0]
 
 			// --format=json is a pure, read-only report.
 			if outputFormat == FormatJSON {
-				data, jerr := buildListJSON(toolName)
+				data, jerr := buildListJSON(toolName, showSizes)
 				return emitJSON(data, jerr)
 			}
 
@@ -52,10 +62,12 @@ func newListCmd() *cobra.Command {
 			}
 
 			fmt.Println()
-			printToolListBody(tool, versions)
+			printToolListBody(tool, versions, showSizes)
 			return nil
 		},
 	}
+	cmd.Flags().Bool("sizes", false, "show real on-disk size per installed version, plus subtotals")
+	return cmd
 }
 
 // printToolListBody renders one tool's installed versions -- exactly
@@ -65,8 +77,10 @@ func newListCmd() *cobra.Command {
 // own -- the caller controls spacing, since that differs between the
 // single-tool case (one blank line before this) and the all-tools
 // case (a tool-name header immediately before this, no extra blank
-// between them).
-func printToolListBody(tool tooldef.Tool, versions []inventory.Version) {
+// between them). Returns the tool's own total size in bytes (0 if
+// showSizes is false) so printAllToolsList can accumulate a grand
+// total across tools without re-walking anything.
+func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSizes bool) int64 {
 	// Determined ONCE, tool-wide -- current/default are facts about
 	// the TOOL, not about which group (managed vs not) an entry
 	// happens to fall into.
@@ -80,22 +94,40 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version) {
 	}
 	defaultVersion, _ := readDefault(tool)
 
-	// Returns the PLAIN (unstyled) current/default tag text for a
-	// version -- coloring happens later, via renderTable's styleFunc,
-	// not baked into these strings. A real, confirmed reason for that
-	// split: lipgloss/table miscalculates column widths when cell
-	// content carries embedded ANSI codes (verified directly -- it
-	// silently truncated real version numbers when a neighboring cell
-	// was pre-styled), so styling must stay separate from the text
-	// itself, applied only at render time.
-	annotate := func(v inventory.Version) (currentTag, defaultTag string) {
+	// Computed ONCE per version here, not inside annotate (which can
+	// be called more than once per version across the managed/
+	// external split below) -- avoids walking the same directory
+	// tree twice.
+	var sizes map[string]int64
+	var toolTotal int64
+	if showSizes {
+		sizes = make(map[string]int64, len(versions))
+		for _, v := range versions {
+			n := dirSize(v.Path)
+			sizes[v.Number] = n
+			toolTotal += n
+		}
+	}
+
+	// Returns the PLAIN (unstyled) current/default/size tag text for
+	// a version -- coloring happens later, via renderTable's
+	// styleFunc, not baked into these strings. A real, confirmed
+	// reason for that split: lipgloss/table miscalculates column
+	// widths when cell content carries embedded ANSI codes (verified
+	// directly -- it silently truncated real version numbers when a
+	// neighboring cell was pre-styled), so styling must stay separate
+	// from the text itself, applied only at render time.
+	annotate := func(v inventory.Version) (currentTag, defaultTag, sizeTag string) {
 		if v.Number == currentVersion {
 			currentTag = "(current)"
 		}
 		if v.Number == defaultVersion {
 			defaultTag = "(default)"
 		}
-		return currentTag, defaultTag
+		if showSizes {
+			sizeTag = formatMB(sizes[v.Number])
+		}
+		return currentTag, defaultTag, sizeTag
 	}
 
 	// Grouped by managed/not-managed with a header stated ONCE per
@@ -121,7 +153,7 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version) {
 	// than clearly communicating "there's nothing here yet".
 	if len(managed) == 0 && len(external) == 0 {
 		fmt.Println(styles.Neutral.Render(fmt.Sprintf("No %s versions found to list.", tool.DisplayName)))
-		return
+		return 0
 	}
 
 	printedManaged := printManagedGroup(tool, styles.Header.Render("Managed by SDK Keeper:"), managed, annotate)
@@ -139,6 +171,12 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version) {
 	// where the suffix is data sk itself generated during a real,
 	// verified install.
 	printGroup(styles.Header.Render("Not managed by SDK Keeper:"), external, annotate, "  ")
+
+	if showSizes {
+		fmt.Println()
+		fmt.Println(styles.Detail.Render(fmt.Sprintf("  %s total: %s", tool.DisplayName, formatMB(toolTotal))))
+	}
+	return toolTotal
 }
 
 // printAllToolsList implements `sk list` with no arguments: one
@@ -153,10 +191,9 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version) {
 // specifically to answer "what does sk support" regardless of
 // install state. Duplicating that here, and doing it worse as the
 // registry grows past a handful of tools (a wall of "No X versions
-// found" lines drowning the 2-3 tools someone actually has), served
-// no one. --format=json filters the same way, for the same reason --
-// see buildAllToolsListJSON's own doc comment.
-func printAllToolsList() error {
+// found), served no one. --format=json filters the same way, for the
+// same reason -- see buildAllToolsListJSON's own doc comment.
+func printAllToolsList(showSizes bool) error {
 	type populated struct {
 		tool     tooldef.Tool
 		versions []inventory.Version
@@ -180,12 +217,16 @@ func printAllToolsList() error {
 		return nil
 	}
 
+	var grandTotal int64
 	for _, p := range withInstalls {
 		fmt.Println()
 		fmt.Println(styles.Header.Render(p.tool.DisplayName + ":"))
-		printToolListBody(p.tool, p.versions)
+		grandTotal += printToolListBody(p.tool, p.versions, showSizes)
 	}
 	fmt.Println()
+	if showSizes {
+		fmt.Println(styles.Header.Render(fmt.Sprintf("Grand total: %s", formatMB(grandTotal))))
+	}
 	fmt.Println(styles.Detail.Render("Tip: `sk list <tool>` shows just one."))
 	return nil
 }
@@ -205,7 +246,7 @@ func printAllToolsList() error {
 // bare-named managed entry from before vendor suffixes existed at all
 // (no recognizable suffix) falls into its own "Other" bucket, rather
 // than being silently mis-grouped or dropped.
-func printManagedGroup(tool tooldef.Tool, header string, group []inventory.Version, annotate func(inventory.Version) (string, string)) bool {
+func printManagedGroup(tool tooldef.Tool, header string, group []inventory.Version, annotate func(inventory.Version) (string, string, string)) bool {
 	if len(group) == 0 {
 		return false
 	}
@@ -266,7 +307,7 @@ func versionVendor(number string, knownVendors []string) (string, bool) {
 
 // printGroup prints a header followed by each version in the group.
 // Returns false (and prints nothing) if the group is empty.
-func printGroup(header string, group []inventory.Version, annotate func(inventory.Version) (string, string), indent string) bool {
+func printGroup(header string, group []inventory.Version, annotate func(inventory.Version) (string, string, string), indent string) bool {
 	if len(group) == 0 {
 		return false
 	}
@@ -314,9 +355,9 @@ func versionColumnWidth(group []inventory.Version) int {
 // those is always a single, self-contained render, never split across
 // several separate calls that need to visually line up with each
 // other.
-func printVersions(group []inventory.Version, annotate func(inventory.Version) (string, string), indent string, versionWidth int) {
+func printVersions(group []inventory.Version, annotate func(inventory.Version) (string, string, string), indent string, versionWidth int) {
 	for _, v := range group {
-		current, def := annotate(v)
+		current, def, size := annotate(v)
 		// "(current)" and "(default)" each keep their own distinct
 		// color (styles.Active vs styles.Default -- see
 		// Styles.Default's own doc comment for why: a real,
@@ -337,7 +378,11 @@ func printVersions(group []inventory.Version, annotate func(inventory.Version) (
 		if len(tags) > 0 {
 			tag = " " + strings.Join(tags, " ")
 		}
-		fmt.Printf("%s%-*s  %s%s\n", indent, versionWidth, v.Number, displayPath(v), tag)
+		sizeCol := ""
+		if size != "" {
+			sizeCol = "  " + styles.Detail.Render(size)
+		}
+		fmt.Printf("%s%-*s  %s%s%s\n", indent, versionWidth, v.Number, displayPath(v), tag, sizeCol)
 	}
 }
 
@@ -420,11 +465,17 @@ func buildPickerGroups(tool tooldef.Tool, versions []inventory.Version) []picker
 }
 
 // listInstalledEntry/listData are list's --format=json success shape.
+// SizeBytes is a pointer so it's omitted entirely (not present as
+// null or 0) unless --sizes was actually passed -- a plain
+// `sk list --format=json` shouldn't pay the directory-walk cost, or
+// have callers wonder whether a 0 means "empty install" or "wasn't
+// computed".
 type listInstalledEntry struct {
 	Version   string  `json:"version"`
 	Vendor    *string `json:"vendor"`
 	IsDefault bool    `json:"isDefault"`
 	IsCurrent bool    `json:"isCurrent"`
+	SizeBytes *int64  `json:"sizeBytes,omitempty"`
 }
 
 type listData struct {
@@ -439,7 +490,7 @@ type listData struct {
 // readDefault calls as buildCurrentJSON, against the same
 // inventory.Scan result, so list's isCurrent can never disagree with
 // current's own active value.
-func buildListJSON(toolName string) (*listData, *jsonError) {
+func buildListJSON(toolName string, showSizes bool) (*listData, *jsonError) {
 	tool, ok := tooldef.Get(toolName)
 	if !ok {
 		return nil, &jsonError{Code: ErrCodeAmbiguousTool, Message: fmt.Sprintf("unknown tool: %s", toolName)}
@@ -462,12 +513,17 @@ func buildListJSON(toolName string) (*listData, *jsonError) {
 
 	entries := make([]listInstalledEntry, 0, len(versions))
 	for _, v := range versions {
-		entries = append(entries, listInstalledEntry{
+		entry := listInstalledEntry{
 			Version:   v.Number,
 			Vendor:    vendorOf(tool.Name, v.Number),
 			IsDefault: v.Number == defaultVersion,
 			IsCurrent: v.Number == currentVersion,
-		})
+		}
+		if showSizes {
+			n := dirSize(v.Path)
+			entry.SizeBytes = &n
+		}
+		entries = append(entries, entry)
 	}
 
 	return &listData{Tool: tool.Name, Installed: entries}, nil
@@ -497,10 +553,10 @@ type allToolsListData struct {
 // buildAllToolsListJSON mirrors printAllToolsList's own filtering
 // exactly (same sortedTools() order, same "skip anything with zero
 // installed" rule) -- see allToolsListData's doc comment for why.
-func buildAllToolsListJSON() *allToolsListData {
+func buildAllToolsListJSON(showSizes bool) *allToolsListData {
 	tools := make([]listData, 0, len(tooldef.Registry))
 	for _, tool := range sortedTools() {
-		data, jerr := buildListJSON(tool.Name)
+		data, jerr := buildListJSON(tool.Name, showSizes)
 		if jerr != nil {
 			// Genuinely unreachable given the loop is driven by
 			// tooldef.Registry itself, but handled explicitly rather

@@ -1304,6 +1304,37 @@ assert_contains "$SK_OUT" '"tools":[' "the tools array is present"
 assert_contains "$SK_OUT" '"tool":"java"' "java's entry is present -- it has something installed"
 
 # ════════════════════════════════════════════════════════════════
+section "S. 'sk list --sizes' -- real on-disk usage, opt-in only"
+# ════════════════════════════════════════════════════════════════
+cd "$TEST_HOME"
+unset JAVA_HOME MAVEN_HOME GRADLE_HOME
+fake_jdk "$CANDIDATES/JDK-21.0.2-temurin" "21.0.2-temurin"
+# fake_jdk's own fake binary is tiny -- pad it to a known, real size
+# so the assertions below check an EXACT number, not just "some MB".
+head -c 5242880 /dev/urandom > "$CANDIDATES/JDK-21.0.2-temurin/bin/java" 2>/dev/null \
+    || dd if=/dev/zero of="$CANDIDATES/JDK-21.0.2-temurin/bin/java" bs=1024 count=5120 2>/dev/null
+
+step "S1. Without --sizes: no size info, exactly like before"
+capture_sk_direct list java
+assert_not_contains "$SK_OUT" "MB" "no size column without the flag"
+assert_not_contains "$SK_OUT" "total:" "no subtotal line without the flag"
+
+step "S2. With --sizes: exact per-version size and a per-tool subtotal"
+capture_sk_direct list java --sizes
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "5.0 MB" "the real, exact size of the padded fake JDK"
+assert_contains "$SK_OUT" "JDK total: 5.0 MB" "a per-tool subtotal line"
+
+step "S3. --format=json: sizeBytes omitted by default, present with --sizes"
+capture_sk_direct --format=json list java
+assert_not_contains "$SK_OUT" "sizeBytes" "omitted entirely when sizes weren't requested"
+capture_sk_direct --format=json list java --sizes
+assert_contains "$SK_OUT" '"sizeBytes":5242880' "the exact byte count when sizes were requested"
+
+cd "$TEST_HOME"
+unset JAVA_HOME MAVEN_HOME GRADLE_HOME
+
+# ════════════════════════════════════════════════════════════════
 section "Summary"
 # ════════════════════════════════════════════════════════════════
 print ""

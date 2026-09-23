@@ -182,7 +182,7 @@ func TestPrintManagedGroup_VendorsShareIdenticalColumnAlignment(t *testing.T) {
 		{Number: "22.0.1-liberica", Path: "/x/JDK-22.0.1-liberica"},
 		{Number: "19-liberica", Path: "/x/JDK-19-liberica"},
 	}
-	annotate := func(v inventory.Version) (string, string) { return "", "" }
+	annotate := func(v inventory.Version) (string, string, string) { return "", "", "" }
 
 	out := captureStdout(t, func() {
 		printManagedGroup(tool, "Managed by SDK Keeper:", versions, annotate)
@@ -208,7 +208,7 @@ func TestPrintManagedGroup_VendorsShareIdenticalColumnAlignment(t *testing.T) {
 
 func TestBuildListJSON_UnknownToolIsAmbiguousTool(t *testing.T) {
 	setTestHome(t, t.TempDir())
-	_, jerr := buildListJSON("not-a-real-tool")
+	_, jerr := buildListJSON("not-a-real-tool", false)
 	if jerr == nil || jerr.Code != ErrCodeAmbiguousTool {
 		t.Fatalf("expected ambiguous_tool, got %+v", jerr)
 	}
@@ -220,7 +220,7 @@ func TestBuildListJSON_UnknownToolIsAmbiguousTool(t *testing.T) {
 // iterates data.installed without a nil-check first.
 func TestBuildListJSON_EmptyInventoryReportsEmptyArrayNotNull(t *testing.T) {
 	setTestHome(t, t.TempDir())
-	data, jerr := buildListJSON("java")
+	data, jerr := buildListJSON("java", false)
 	if jerr != nil {
 		t.Fatalf("expected success, got error: %+v", jerr)
 	}
@@ -253,7 +253,7 @@ func TestBuildListJSON_ReportsVendorDefaultAndCurrentCorrectly(t *testing.T) {
 
 	t.Setenv(tool.EnvVar, tool.HomePath(dir))
 
-	data, jerr := buildListJSON("java")
+	data, jerr := buildListJSON("java", false)
 	if jerr != nil {
 		t.Fatalf("expected success, got error: %+v", jerr)
 	}
@@ -280,7 +280,7 @@ func TestBuildListJSON_SingleVendorToolAlwaysReportsNilVendor(t *testing.T) {
 	setTestHome(t, home)
 	installFakeMaven(t, home, "3.9.9")
 
-	data, jerr := buildListJSON("maven")
+	data, jerr := buildListJSON("maven", false)
 	if jerr != nil {
 		t.Fatalf("expected success, got error: %+v", jerr)
 	}
@@ -303,7 +303,7 @@ func TestBuildAllToolsListJSON_OnlyIncludesToolsWithSomethingInstalled(t *testin
 	installFakeJava(t, home, "21.0.2-temurin")
 	// Deliberately nothing installed for maven/gradle/kafka/node.
 
-	data := buildAllToolsListJSON()
+	data := buildAllToolsListJSON(false)
 	if len(data.Tools) != 1 {
 		t.Fatalf("expected exactly 1 tool (java), got %d: %+v", len(data.Tools), data.Tools)
 	}
@@ -314,7 +314,7 @@ func TestBuildAllToolsListJSON_OnlyIncludesToolsWithSomethingInstalled(t *testin
 
 func TestBuildAllToolsListJSON_NothingInstalledAnywhereIsEmptyArray(t *testing.T) {
 	setTestHome(t, t.TempDir())
-	data := buildAllToolsListJSON()
+	data := buildAllToolsListJSON(false)
 	if data.Tools == nil {
 		t.Error("expected a non-nil (empty) slice, got nil -- would serialize as JSON null instead of []")
 	}
@@ -337,8 +337,8 @@ func TestBuildAllToolsListJSON_MatchesPerToolBuildListJSON(t *testing.T) {
 	dir := filepath.Join(tool.CandidateRoot(), tool.FolderPrefix+"21.0.2-temurin")
 	t.Setenv(tool.EnvVar, tool.HomePath(dir))
 
-	all := buildAllToolsListJSON()
-	direct, jerr := buildListJSON("java")
+	all := buildAllToolsListJSON(false)
+	direct, jerr := buildListJSON("java", false)
 	if jerr != nil {
 		t.Fatalf("expected success, got error: %+v", jerr)
 	}
@@ -376,7 +376,7 @@ func TestPrintAllToolsList_SkipsEmptyToolsEntirely(t *testing.T) {
 
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = printAllToolsList()
+		runErr = printAllToolsList(false)
 	})
 	if runErr != nil {
 		t.Fatalf("expected success, got: %v", runErr)
@@ -400,7 +400,7 @@ func TestPrintAllToolsList_NothingInstalledAnywhereShowsOneMessage(t *testing.T)
 
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = printAllToolsList()
+		runErr = printAllToolsList(false)
 	})
 	if runErr != nil {
 		t.Fatalf("expected success, got: %v", runErr)
@@ -426,7 +426,7 @@ func TestPrintAllToolsList_EndsWithNarrowingTip(t *testing.T) {
 	installFakeJava(t, home, "21.0.2-temurin")
 
 	out := captureStdout(t, func() {
-		if err := printAllToolsList(); err != nil {
+		if err := printAllToolsList(false); err != nil {
 			t.Fatalf("expected success, got: %v", err)
 		}
 	})
@@ -447,7 +447,7 @@ func TestPrintAllToolsList_ToolOrderMatchesSortedTools(t *testing.T) {
 	installFakeGradle(t, home, "8.5")
 
 	out := captureStdout(t, func() {
-		if err := printAllToolsList(); err != nil {
+		if err := printAllToolsList(false); err != nil {
 			t.Fatalf("expected success, got: %v", err)
 		}
 	})
