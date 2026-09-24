@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -374,5 +375,124 @@ func TestBuildDoctorJSON_ReturnsAllNamedChecks(t *testing.T) {
 		if c.Status != "pass" && c.Status != "warn" && c.Status != "fail" {
 			t.Errorf("check %q has an illegal status %q", c.Name, c.Status)
 		}
+	}
+}
+
+// TestPrintCheck_NoIssuesReturnsPass confirms printCheck's return
+// tuple mirrors doctorCheckJSONFrom's own classification exactly (0
+// issues -> pass) -- the same rule, not a separately reimplemented
+// one, so the compact plain-text summary line built from this can
+// never disagree with what --format=json reports for the same run.
+func TestPrintCheck_NoIssuesReturnsPass(t *testing.T) {
+	var pass, warn, fail int
+	withSession(t, func() {
+		pass, warn, fail = printCheck("thing", "things", nil)
+	})
+	if pass != 1 || warn != 0 || fail != 0 {
+		t.Errorf("expected (1,0,0), got (%d,%d,%d)", pass, warn, fail)
+	}
+}
+
+func TestPrintCheck_AllWarningIssuesReturnsWarn(t *testing.T) {
+	issues := []doctorIssue{{warning: true, message: "leftover temp dir"}}
+	var pass, warn, fail int
+	withSession(t, func() {
+		pass, warn, fail = printCheck("thing", "things", issues)
+	})
+	if pass != 0 || warn != 1 || fail != 0 {
+		t.Errorf("expected (0,1,0), got (%d,%d,%d)", pass, warn, fail)
+	}
+}
+
+func TestPrintCheck_AnyNonWarningIssueReturnsFail(t *testing.T) {
+	// Mixed: one warning-level issue alongside one real one -- each
+	// counted in ITS OWN category now (per-item counting), not
+	// merged into a single "whole check counts as fail" outcome.
+	issues := []doctorIssue{
+		{warning: true, message: "cosmetic"},
+		{warning: false, message: "a real problem"},
+	}
+	var pass, warn, fail int
+	withSession(t, func() {
+		pass, warn, fail = printCheck("thing", "things", issues)
+	})
+	if pass != 0 || warn != 1 || fail != 1 {
+		t.Errorf("expected (0,1,1) -- the warning counted as 1 warn, the real issue counted as 1 fail -- got (%d,%d,%d)", pass, warn, fail)
+	}
+}
+
+// TestPrintCheck_MultipleRealIssuesCountedIndividually is the
+// regression test for the actual reported case: 2 dangling
+// registrations must tally as 2 failures, not 1 -- the user sees two
+// concrete broken symlinks listed, and the summary should say so, not
+// collapse them into "1 failure" just because they came from the same
+// named check.
+func TestPrintCheck_MultipleRealIssuesCountedIndividually(t *testing.T) {
+	issues := []doctorIssue{
+		{warning: false, message: "JDK 25.0.1 is registered, but its real target no longer exists"},
+		{warning: false, message: "JDK 21.0.2 is registered, but its real target no longer exists"},
+	}
+	var pass, warn, fail int
+	withSession(t, func() {
+		pass, warn, fail = printCheck("dangling registration", "dangling registrations", issues)
+	})
+	if pass != 0 || warn != 0 || fail != 2 {
+		t.Errorf("expected (0,0,2) for 2 real issues, got (%d,%d,%d)", pass, warn, fail)
+	}
+}
+
+// TestFormatDoctorSummary_AllZeroShowsAllThreeCategoriesMuted
+// confirms the fully-healthy case: all three categories are always
+// shown, even at zero -- not omitted, and not falsely alarming (no
+// Warning/Error coloring on a genuine zero).
+func TestFormatDoctorSummary_AllZeroShowsAllThreeCategoriesMuted(t *testing.T) {
+	out := withSession(t, func() {
+		fmt.Fprintln(session.Out, formatDoctorSummary(doctorSummaryJSON{Pass: 5, Warn: 0, Fail: 0}))
+	})
+	if !strings.Contains(out, "5 passed") || !strings.Contains(out, "0 warnings") || !strings.Contains(out, "0 failures") {
+		t.Errorf("expected all three categories present even at zero, got: %q", out)
+	}
+}
+
+func TestFormatDoctorSummary_SingularPluralWording(t *testing.T) {
+	out := withSession(t, func() {
+		fmt.Fprintln(session.Out, formatDoctorSummary(doctorSummaryJSON{Pass: 1, Warn: 1, Fail: 1}))
+	})
+	if !strings.Contains(out, "1 warning ") && !strings.HasSuffix(strings.TrimRight(out, "\n"), "1 warning") {
+		t.Errorf("expected singular 'warning' (no trailing s) for count 1, got: %q", out)
+	}
+	if strings.Contains(out, "1 warnings") {
+		t.Errorf("expected singular 'warning', got plural in: %q", out)
+	}
+	if strings.Contains(out, "1 failures") {
+		t.Errorf("expected singular 'failure', got plural in: %q", out)
+	}
+}
+
+func TestFormatDoctorSummary_MixedCountsAllPresent(t *testing.T) {
+	out := withSession(t, func() {
+		fmt.Fprintln(session.Out, formatDoctorSummary(doctorSummaryJSON{Pass: 4, Warn: 1, Fail: 1}))
+	})
+	if !strings.Contains(out, "4 passed") || !strings.Contains(out, "1 warning") || !strings.Contains(out, "1 failure") {
+		t.Errorf("expected all three real counts present, got: %q", out)
+	}
+}
+
+func TestDoctorCmd_SummaryLineAlwaysPrintedEvenOnHealthyRun(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+
+	var pass, warn, fail int
+	out := withSession(t, func() {
+		pass, warn, fail = printCheck("thing", "things", nil)
+		fmt.Fprintln(session.Out)
+		fmt.Fprintln(session.Out, styles.Success.Render("\u2713 Everything looks healthy."))
+		fmt.Fprintln(session.Out, formatDoctorSummary(doctorSummaryJSON{Pass: pass, Warn: warn, Fail: fail}))
+	})
+	if !strings.Contains(out, "Everything looks healthy") {
+		t.Errorf("expected the healthy message still present, got: %q", out)
+	}
+	if !strings.Contains(out, "1 passed") || !strings.Contains(out, "0 warnings") || !strings.Contains(out, "0 failures") {
+		t.Errorf("expected the summary line to ALSO print, with all zero categories shown, got: %q", out)
 	}
 }

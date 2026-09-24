@@ -57,28 +57,86 @@ func newDoctorCmd() *cobra.Command {
 			fmt.Fprintln(session.Out, styles.Header.Render("Checking SDK Keeper..."))
 			fmt.Fprintln(session.Out)
 
-			total := 0
-			total += printCheck("dangling registration", "dangling registrations", checkDanglingRegistrations())
-			total += printCheck("incomplete install", "incomplete installs", checkIncompleteInstalls())
-			total += printCheck("stale default", "stale defaults", checkStaleDefaults())
-			total += printCheck("leftover temp directory", "leftover temp directories", checkLeftoverTempDirs())
-			total += printVendorReachability(cmd.Context())
+			// summary is the SAME struct type buildDoctorJSON's own
+			// summary uses (doctorSummaryJSON) -- not a separately
+			// reimplemented tally, so a category can never mean a
+			// subtly different thing between text and JSON. Computed
+			// alongside the existing detailed printing, in the SAME
+			// pass -- calling buildDoctorJSON separately here would
+			// re-run every check a second time, including real
+			// network calls for vendor reachability, just to get a
+			// number already available from the printing this does
+			// anyway.
+			var summary doctorSummaryJSON
+			tally := func(pass, warn, fail int) {
+				summary.Pass += pass
+				summary.Warn += warn
+				summary.Fail += fail
+			}
+			tally(printCheck("dangling registration", "dangling registrations", checkDanglingRegistrations()))
+			tally(printCheck("incomplete install", "incomplete installs", checkIncompleteInstalls()))
+			tally(printCheck("stale default", "stale defaults", checkStaleDefaults()))
+			tally(printCheck("leftover temp directory", "leftover temp directories", checkLeftoverTempDirs()))
+			vendorPass, vendorFail := printVendorReachability(cmd.Context())
+			tally(vendorPass, 0, vendorFail)
 
 			fmt.Fprintln(session.Out)
-			if total == 0 {
+			if summary.Warn == 0 && summary.Fail == 0 {
 				fmt.Fprintln(session.Out, styles.Success.Render("\u2713 Everything looks healthy."))
+			}
+			fmt.Fprintln(session.Out, formatDoctorSummary(summary))
+			if summary.Warn == 0 && summary.Fail == 0 {
 				return nil
 			}
-			plural := "s"
-			if total == 1 {
-				plural = ""
-			}
-			fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("%d problem%s found.", total, plural)))
-			return fmt.Errorf("%d problems found", total)
+			return fmt.Errorf("%d check(s) failed or warned", summary.Warn+summary.Fail)
 		},
 	}
 	cmd.AddCommand(newDoctorFixCmd())
 	return cmd
+}
+
+// formatDoctorSummary renders the compact, color-coded tally line --
+// e.g. "✓ 5 passed  ⚠ 0 warnings  ✗ 0 failures" -- always printed,
+// all three categories always shown, even at zero. An earlier version
+// of this omitted zero categories and skipped the line entirely on a
+// healthy run (matching sk's own "don't print an empty/zero thing"
+// convention elsewhere, e.g. list's empty-group omission) -- reversed
+// on request: a consistent three-number shape every time is worth
+// more here than the extra brevity, the same way a test runner's "5
+// passed, 0 failed" convention always shows the zero rather than
+// omitting it. A zero count still uses its category's own glyph
+// (✓/⚠/✗) for consistent layout, but renders in the muted Detail
+// style rather than Warning/Error -- so "✗ 0 failures" reads as
+// "checked, found none" at a glance, not as a false alarm.
+//
+// A pure function, not inlined into RunE -- doctor's own vendor-
+// reachability check makes a real network call, which is always
+// unreachable in a sandboxed/offline test environment, so there's no
+// way to exercise a genuinely all-healthy (0 warn, 0 fail) run
+// through the full command. Extracted so the RENDERING itself,
+// including the zero-count muted-styling rule, is directly testable
+// against a hand-built summary regardless of network access.
+func formatDoctorSummary(summary doctorSummaryJSON) string {
+	warnStyle, failStyle := styles.Detail, styles.Detail
+	if summary.Warn > 0 {
+		warnStyle = styles.Warning
+	}
+	if summary.Fail > 0 {
+		failStyle = styles.Error
+	}
+	warnPlural, failPlural := "s", "s"
+	if summary.Warn == 1 {
+		warnPlural = ""
+	}
+	if summary.Fail == 1 {
+		failPlural = ""
+	}
+	parts := []string{
+		styles.Success.Render(fmt.Sprintf("\u2713 %d passed", summary.Pass)),
+		warnStyle.Render(fmt.Sprintf("\u26a0 %d warning%s", summary.Warn, warnPlural)),
+		failStyle.Render(fmt.Sprintf("\u2717 %d failure%s", summary.Fail, failPlural)),
+	}
+	return strings.Join(parts, "  ")
 }
 
 // newDoctorFixCmd is `sk doctor fix` -- a real subcommand, not a
@@ -186,10 +244,33 @@ func runDoctorFix() error {
 // printCheck renders one check's result: "✓ No X" if issues is empty,
 // or a "✗/⚠ N X found:" header with each issue as a sub-line. Returns
 // the count printed, for the overall summary tally.
-func printCheck(singular, plural string, issues []doctorIssue) int {
+// printCheck prints one check's detailed findings (unchanged from
+// before), and returns a PER-ITEM pass/warn/fail tally -- each issue
+// counted individually (2 dangling registrations -> 2, not 1),
+// classified by its own `.warning` field, not "the whole check counts
+// as whichever category applies to ALL of it". Matches what's
+// actually visible on screen: the header's own glyph/style still
+// summarizes the whole block via allWarnings (a real failure present
+// anywhere makes the header read as ✗, not ⚠), but the compact
+// summary line's NUMBERS now count individual findings, since that's
+// what the user actually sees printed -- they have no visibility into
+// "check groups" as a concept, only the individual lines under each
+// header.
+//
+// This is a deliberate divergence from --format=json's own summary,
+// which still counts by NAMED CHECK (one pass/warn/fail per check,
+// e.g. "dangling_registrations": "fail", regardless of how many
+// stale entries it found) -- that's the design doc's own frozen,
+// already-documented schema, and restructuring it to also split into
+// one entry per individual issue would be a real, separate breaking
+// change to a machine-readable contract scripts may already depend
+// on. Text and JSON now count DIFFERENTLY on purpose: text answers
+// "how many problems did I just read", JSON answers "which named
+// checks failed".
+func printCheck(singular, plural string, issues []doctorIssue) (pass, warn, fail int) {
 	if len(issues) == 0 {
 		fmt.Fprintln(session.Out, styles.Success.Render(fmt.Sprintf("\u2713 No %s", plural)))
-		return 0
+		return 1, 0, 0
 	}
 
 	label := plural
@@ -208,8 +289,13 @@ func printCheck(singular, plural string, issues []doctorIssue) int {
 		if issue.fix != "" {
 			fmt.Fprintln(session.Out, styles.Detail.Render("    \u2192 "+issue.fix))
 		}
+		if issue.warning {
+			warn++
+		} else {
+			fail++
+		}
 	}
-	return len(issues)
+	return 0, warn, fail
 }
 
 func allWarnings(issues []doctorIssue) bool {
@@ -351,8 +437,16 @@ func checkLeftoverTempDirs() []doctorIssue {
 // does this on every startup). A short timeout avoids hanging on an
 // offline machine. Iterates every registered tool/provider
 // generically, so a future tool is picked up automatically.
-func printVendorReachability(ctx context.Context) int {
-	problems := 0
+// printVendorReachability prints one line per tool+vendor
+// combination, and now returns a per-line pass/fail tally too --
+// each individual vendor counted separately (4 unreachable vendors
+// -> 4, not 1), matching printCheck's own same reasoning: the user
+// sees 4 individual lines, so the summary counts 4, not "1 combined
+// vendor_reachability finding". Diverges from
+// buildVendorReachabilityCheckJSON's own single combined check for
+// the same documented-JSON-contract reason printCheck's own doc
+// comment explains.
+func printVendorReachability(ctx context.Context) (pass, fail int) {
 	for _, tool := range sortedTools() {
 		for _, name := range vendorNamesFor(tool.Name) {
 			provider := providersFor(tool.Name)[name]
@@ -361,13 +455,14 @@ func printVendorReachability(ctx context.Context) int {
 			cancel()
 			if err != nil {
 				fmt.Fprintln(session.Out, styles.Error.Render(fmt.Sprintf("\u2717 %s API unreachable: %s", capitalize(name), err)))
-				problems++
+				fail++
 				continue
 			}
 			fmt.Fprintln(session.Out, styles.Success.Render(fmt.Sprintf("\u2713 %s API reachable", capitalize(name))))
+			pass++
 		}
 	}
-	return problems
+	return pass, fail
 }
 
 // toolOrder is the deliberate presentation order -- Java first, then

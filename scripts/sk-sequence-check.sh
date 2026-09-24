@@ -1215,6 +1215,32 @@ assert_contains "$SK_OUT" "1 leftover temp directory found" "the leftover temp d
 assert_exit_code "$SK_EXIT" "1" "doctor exits non-zero when problems are found"
 assert_true "$([[ -d "$CANDIDATES/JDK-66.0.0-temurin" ]] && echo true || echo false)" \
     "'sk doctor' alone never mutates anything -- the broken directory is still there"
+# The warning count is deterministic regardless of real network
+# access (leftover-temp is always exactly 1), but the FAILURE count
+# is NOT: vendor_reachability is a real network check, so it's a
+# pass on a machine with real internet access and a fail in a
+# network-restricted sandbox with none -- either 3 (dangling+
+# incomplete+stale only) or 4 (+ vendor_reachability) failures is
+# correct, depending on the environment this script actually runs
+# in. Asserting a single hardcoded count here was the bug, not
+# anything about doctor's own output.
+assert_contains "$SK_OUT" "⚠ 1 warning" \
+    "leftover-temp always shows as exactly 1 warning, regardless of vendor-network reachability"
+failure_count=$(echo "$SK_OUT" | grep -oE '✗ [0-9]+ failures?' | grep -oE '[0-9]+')
+assert_true "$([[ -n "$failure_count" && "$failure_count" -ge 3 ]] && echo true || echo false)" \
+    "at least the 3 network-independent failures (dangling+incomplete+stale) are counted -- vendor_reachability may add a 4th if this environment has no real internet access, but the local three are always guaranteed"
+
+step "Q1a. Multiple individual issues in ONE check count individually in the summary, not as '1'"
+ln -s /nonexistent-target-2 "$CANDIDATES/JDK-89.0.0"
+ln -s /nonexistent-target-3 "$CANDIDATES/JDK-90.0.0"
+capture_sk_direct doctor
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "3 dangling registrations found" \
+    "the header itself already showed the real item count -- now 3 (was 1) after adding two more stale symlinks"
+failure_count=$(echo "$SK_OUT" | grep -oE '✗ [0-9]+ failures?' | grep -oE '[0-9]+')
+assert_true "$([[ -n "$failure_count" && "$failure_count" -ge 5 ]] && echo true || echo false)" \
+    "the summary's failure COUNT reflects all 3 individual dangling registrations (not 1 for the whole check) plus incomplete+stale -- at least 5 network-independent failures now, not 3"
+rm -f "$CANDIDATES/JDK-89.0.0" "$CANDIDATES/JDK-90.0.0"
 
 step "Q2. 'sk doctor fix' actually fixes the mechanical ones, reports the rest as still-needed"
 capture_sk_direct doctor fix

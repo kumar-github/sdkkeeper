@@ -263,15 +263,15 @@ func TestRenderDownloadProgress_KnownTotal(t *testing.T) {
 	if !strings.Contains(line, "50%") {
 		t.Errorf("expected 50%% in output, got: %q", line)
 	}
-	if !strings.Contains(line, "#") || !strings.Contains(line, ".") {
-		t.Errorf("expected both filled (#) and empty (.) bar segments at 50%%, got: %q", line)
+	if !strings.Contains(line, "\u2588") || !strings.Contains(line, "\u2591") {
+		t.Errorf("expected both filled (\u2588) and empty (\u2591) bar segments at 50%%, got: %q", line)
 	}
 }
 
 func TestRenderDownloadProgress_FullBarAtCompletion(t *testing.T) {
 	// Large, realistic byte values -- avoids the byte-count text
 	// itself containing a decimal point (e.g. "0.0 MB") being
-	// mistaken for a bar-fill character when checking for "."
+	// mistaken for a bar-fill character when checking the bar.
 	line := renderDownloadProgress(100*1024*1024, 100*1024*1024, 0)
 	barStart := strings.Index(line, "[")
 	barEnd := strings.Index(line, "]")
@@ -279,8 +279,8 @@ func TestRenderDownloadProgress_FullBarAtCompletion(t *testing.T) {
 		t.Fatalf("expected a bracketed bar in output, got: %q", line)
 	}
 	bar := line[barStart+1 : barEnd]
-	if strings.Contains(bar, ".") {
-		t.Errorf("expected a fully-filled bar (no '.' segments) at 100%%, got bar: %q", bar)
+	if strings.Contains(bar, "\u2591") {
+		t.Errorf("expected a fully-filled bar (no \u2591 segments) at 100%%, got bar: %q", bar)
 	}
 	if !strings.Contains(line, "100%") {
 		t.Errorf("expected 100%% in output, got: %q", line)
@@ -291,7 +291,7 @@ func TestRenderDownloadProgress_NeverExceedsBarWidth(t *testing.T) {
 	// A read count slightly exceeding total (possible with chunked
 	// encoding quirks) should never overflow the bar's fixed width.
 	line := renderDownloadProgress(105, 100, 0)
-	if strings.Count(line, "#") > 36 {
+	if strings.Count(line, "\u2588") > 36 {
 		t.Errorf("expected filled bar segments to be capped at bar width, got: %q", line)
 	}
 }

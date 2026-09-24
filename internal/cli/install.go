@@ -103,22 +103,27 @@ func newInstallCmd() *cobra.Command {
 			}
 
 			fmt.Fprintln(session.Out)
-			fmt.Fprintln(session.Out, styles.Detail.Render(
+			var asset registry.Asset
+			spinErr := runWithSpinner(
 				fmt.Sprintf("Resolving %s %s (%s)...", tool.DisplayName, version, provider.Name()),
-			))
-
-			asset, err := provider.ResolveAsset(ctx, version, runtime.GOOS, runtime.GOARCH)
-			if err != nil {
-				if err == registry.ErrVersionNotFound {
+				fmt.Sprintf("Resolved %s %s (%s)", tool.DisplayName, version, provider.Name()),
+				func() error {
+					var resolveErr error
+					asset, resolveErr = provider.ResolveAsset(ctx, version, runtime.GOOS, runtime.GOARCH)
+					return resolveErr
+				},
+			)
+			if spinErr != nil {
+				if spinErr == registry.ErrVersionNotFound {
 					fmt.Fprintln(session.Out, styles.Error.Render(
 						fmt.Sprintf("\u2717 %s %s not found for %s/%s via %s", tool.DisplayName, version, runtime.GOOS, runtime.GOARCH, provider.Name()),
 					))
 					return fmt.Errorf("version not found")
 				}
 				fmt.Fprintln(session.Out, styles.Error.Render(
-					fmt.Sprintf("\u2717 Could not resolve %s %s: %s", tool.DisplayName, version, err),
+					fmt.Sprintf("\u2717 Could not resolve %s %s: %s", tool.DisplayName, version, spinErr),
 				))
-				return err
+				return spinErr
 			}
 
 			// The vendor's own, verbatim filename -- not reformatted --
