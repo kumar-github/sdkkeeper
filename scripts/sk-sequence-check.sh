@@ -1330,6 +1330,50 @@ capture_sk_direct --format=json list java
 assert_not_contains "$SK_OUT" "sizeBytes" "omitted entirely when sizes weren't requested"
 capture_sk_direct --format=json list java --sizes
 assert_contains "$SK_OUT" '"sizeBytes":5242880' "the exact byte count when sizes were requested"
+assert_contains "$SK_OUT" '"managed":true' "the managed install reports managed:true"
+
+step "S4. An add-registered (symlinked) entry reports its REAL target size, not the symlink's own tiny size"
+EXTERNAL_JDK_DIR="$(mktemp -d)/real-external-jdk"
+mkdir -p "$EXTERNAL_JDK_DIR/bin"
+head -c 10485760 /dev/urandom > "$EXTERNAL_JDK_DIR/bin/java" 2>/dev/null \
+    || dd if=/dev/zero of="$EXTERNAL_JDK_DIR/bin/java" bs=1024 count=10240 2>/dev/null
+ln -s "$EXTERNAL_JDK_DIR" "$CANDIDATES/JDK-77.0.0-manual"
+capture_sk_direct list java --sizes
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "10.0 MB" "the real 10MB target size, not the symlink's own near-zero lstat size"
+assert_contains "$SK_OUT" "not managed by SDK Keeper -- \`sk remove\` won't free" "the not-managed tip appears now that an external entry exists"
+assert_contains "$SK_OUT" "JDK total: 15.0 MB" "the total includes BOTH the managed (5MB) and external (10MB) entries"
+capture_sk_direct --format=json list java --sizes
+assert_contains "$SK_OUT" '"sizeBytes":10485760' "the exact real byte count for the external entry in JSON too"
+assert_contains "$SK_OUT" '"managed":false' "the external entry reports managed:false"
+
+step "S5. Sorted by size descending, and a relative bar is drawn, when --sizes is on"
+# Explicit, self-contained setup -- a second managed entry, clearly
+# smaller than the padded 5MB one from S2 above, rather than relying
+# on whatever an unrelated earlier section happened to leave behind.
+fake_jdk "$CANDIDATES/JDK-16.0.2-temurin" "16.0.2-temurin"
+capture_sk_direct list java --sizes
+print -r -- "$SK_OUT"
+# Within the SAME (managed) section -- external entries are a
+# separately-headed section by design (see the earlier "not managed"
+# steps), sorted only among themselves, never merged with managed
+# ones just because one happens to be bigger.
+big_line=$(echo "$SK_OUT" | grep -n "21.0.2-temurin" | cut -d: -f1)
+small_line=$(echo "$SK_OUT" | grep -n "16.0.2-temurin" | cut -d: -f1)
+assert_true "$([[ -n "$big_line" && -n "$small_line" && "$big_line" -lt "$small_line" ]] && echo true || echo false)" \
+    "the padded 5MB entry (21.0.2) prints before the tiny fake_jdk entry (16.0.2) within the managed section"
+assert_contains "$SK_OUT" "█" "a filled block character appears somewhere in the bar column"
+assert_contains "$SK_OUT" "░" "an empty block character appears somewhere in the bar column"
+rm -rf "$CANDIDATES/JDK-16.0.2-temurin"
+
+step "S6. Grand total percentage appears in the all-tools view, not the single-tool one"
+capture_sk_direct list java --sizes
+assert_not_contains "$SK_OUT" "% of grand total" "single-tool 'sk list java --sizes' has nothing to compare against -- no percentage shown"
+capture_sk_direct list --sizes
+print -r -- "$SK_OUT"
+assert_contains "$SK_OUT" "% of grand total)" "the all-tools view shows each tool's share of the grand total"
+
+rm -f "$CANDIDATES/JDK-77.0.0-manual"
 
 cd "$TEST_HOME"
 unset JAVA_HOME MAVEN_HOME GRADLE_HOME

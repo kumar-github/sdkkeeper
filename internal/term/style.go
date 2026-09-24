@@ -59,6 +59,7 @@ type Styles struct {
 	Detail   lipgloss.Style // subordinate info under something else on screen
 	Header   lipgloss.Style // section headings outside the picker, e.g. `list`'s "Managed by SDK Keeper:"
 	Default  lipgloss.Style // list's "(default)" tag specifically
+	External lipgloss.Style // list --sizes's "Not managed by SDK Keeper" rows specifically
 }
 
 // Styles builds a fresh Styles value against this Session's current
@@ -108,5 +109,12 @@ func buildStyles() Styles {
 		// the same purple family, reads as "an sk label") and from
 		// Active's Peach, matching (current)'s own bold visual weight.
 		Default: lipgloss.NewStyle().Foreground(colorMauve).Bold(true),
+		// Same muted color as Detail, but italicized -- so `sk list
+		// --sizes`'s "Not managed by SDK Keeper" rows read as
+		// visually distinct at a glance, not just via their header
+		// text on careful reading. Same reasoning as Warning being
+		// its own style rather than reusing Error: the visual
+		// difference itself is the point, not just the label.
+		External: lipgloss.NewStyle().Foreground(colorSubtext).Italic(true),
 	}
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -61,13 +62,66 @@ func newListCmd() *cobra.Command {
 				return err
 			}
 
+			var sizes map[string]int64
+			var total int64
+			if showSizes {
+				sizes, total = computeSizes(versions)
+			}
+
 			fmt.Println()
-			printToolListBody(tool, versions, showSizes)
+			// grandTotal=0 here means "omit the percentage line" --
+			// there's no grand total to compare against for a single
+			// tool on its own, unlike the all-tools case below.
+			printToolListBody(tool, versions, sizes, total, 0, showSizes)
 			return nil
 		},
 	}
 	cmd.Flags().Bool("sizes", false, "show real on-disk size per installed version, plus subtotals")
 	return cmd
+}
+
+// computeSizes walks every version's real directory (see dirSize) and
+// returns both a per-version lookup and the combined total. Kept
+// separate from printing so printAllToolsList can compute every
+// tool's numbers in a first pass, before printing anything -- the
+// "X% of grand total" line needs the GRAND total, which isn't known
+// until every tool has been walked.
+func computeSizes(versions []inventory.Version) (map[string]int64, int64) {
+	sizes := make(map[string]int64, len(versions))
+	var total int64
+	for _, v := range versions {
+		n := dirSize(v.Path)
+		sizes[v.Number] = n
+		total += n
+	}
+	return sizes, total
+}
+
+// sizeBar draws a compact, fixed-width relative-size indicator, e.g.
+// "████████░░" -- filled proportionally to size/maxSize, so an entry
+// that dwarfs the others in the same listing is visually obvious at a
+// glance, not just from reading the numbers. maxSize is the largest
+// SINGLE entry across the tool's WHOLE listing (managed and external
+// together, computed once in printToolListBody) -- not scoped to just
+// one vendor's own sub-list -- so a manually add-registered JDK that
+// dwarfs the managed ones reads as visually obvious too, not just
+// relative to its own small group. Same Unicode block-character
+// technique as the download progress bar (renderDownloadProgress),
+// just much narrower: this is an inline per-row indicator, not a
+// full standalone progress display.
+func sizeBar(size, maxSize int64) string {
+	const barWidth = 10
+	if maxSize <= 0 {
+		return strings.Repeat("\u2591", barWidth)
+	}
+	filled := int(float64(barWidth) * float64(size) / float64(maxSize))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	if filled < 0 {
+		filled = 0
+	}
+	return strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", barWidth-filled)
 }
 
 // printToolListBody renders one tool's installed versions -- exactly
@@ -77,10 +131,15 @@ func newListCmd() *cobra.Command {
 // own -- the caller controls spacing, since that differs between the
 // single-tool case (one blank line before this) and the all-tools
 // case (a tool-name header immediately before this, no extra blank
-// between them). Returns the tool's own total size in bytes (0 if
-// showSizes is false) so printAllToolsList can accumulate a grand
-// total across tools without re-walking anything.
-func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSizes bool) int64 {
+// between them).
+//
+// sizes/toolTotal are precomputed by the caller (via computeSizes),
+// not walked again here -- printAllToolsList needs the SAME numbers
+// for its own grand-total pre-pass, and walking every directory
+// twice would be wasteful. grandTotal is 0 for the single-tool case
+// (nothing to show a percentage of); printAllToolsList passes the
+// real grand total so each tool's subtotal can show its own share.
+func printToolListBody(tool tooldef.Tool, versions []inventory.Version, sizes map[string]int64, toolTotal int64, grandTotal int64, showSizes bool) {
 	// Determined ONCE, tool-wide -- current/default are facts about
 	// the TOOL, not about which group (managed vs not) an entry
 	// happens to fall into.
@@ -94,30 +153,28 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSize
 	}
 	defaultVersion, _ := readDefault(tool)
 
-	// Computed ONCE per version here, not inside annotate (which can
-	// be called more than once per version across the managed/
-	// external split below) -- avoids walking the same directory
-	// tree twice.
-	var sizes map[string]int64
-	var toolTotal int64
+	// The scale every per-entry bar is drawn relative to -- the
+	// largest SINGLE entry across this tool's whole listing, managed
+	// and external combined. See sizeBar's own doc comment for why
+	// that scope, not a narrower per-vendor one.
+	var maxSize int64
 	if showSizes {
-		sizes = make(map[string]int64, len(versions))
-		for _, v := range versions {
-			n := dirSize(v.Path)
-			sizes[v.Number] = n
-			toolTotal += n
+		for _, n := range sizes {
+			if n > maxSize {
+				maxSize = n
+			}
 		}
 	}
 
-	// Returns the PLAIN (unstyled) current/default/size tag text for
-	// a version -- coloring happens later, via renderTable's
-	// styleFunc, not baked into these strings. A real, confirmed
-	// reason for that split: lipgloss/table miscalculates column
-	// widths when cell content carries embedded ANSI codes (verified
-	// directly -- it silently truncated real version numbers when a
-	// neighboring cell was pre-styled), so styling must stay separate
-	// from the text itself, applied only at render time.
-	annotate := func(v inventory.Version) (currentTag, defaultTag, sizeTag string) {
+	// Returns the PLAIN (unstyled) tag text for a version -- coloring
+	// happens later, applied separately to each piece at render time,
+	// not baked into these strings. A real, confirmed reason for that
+	// split: lipgloss/table miscalculates column widths when cell
+	// content carries embedded ANSI codes (verified directly -- it
+	// silently truncated real version numbers when a neighboring cell
+	// was pre-styled), so styling must stay separate from the text
+	// itself wherever alignment depends on the plain-text length.
+	annotate := func(v inventory.Version) (currentTag, defaultTag, sizeTag, barTag string) {
 		if v.Number == currentVersion {
 			currentTag = "(current)"
 		}
@@ -125,9 +182,11 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSize
 			defaultTag = "(default)"
 		}
 		if showSizes {
-			sizeTag = formatMB(sizes[v.Number])
+			n := sizes[v.Number]
+			sizeTag = formatMB(n)
+			barTag = sizeBar(n, maxSize)
 		}
-		return currentTag, defaultTag, sizeTag
+		return currentTag, defaultTag, sizeTag, barTag
 	}
 
 	// Grouped by managed/not-managed with a header stated ONCE per
@@ -135,9 +194,11 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSize
 	// line -- an earlier version of this did the latter and became a
 	// genuinely crowded wall of text once more than a couple of
 	// entries were present. Each group's versions stay in their
-	// existing sort order (already newest-first from
-	// inventory.Scan); an empty group's header is simply omitted
-	// rather than printed with nothing underneath it.
+	// existing sort order (newest-first from inventory.Scan) UNLESS
+	// showSizes is on, in which case printManagedGroup/printGroup
+	// re-sort by size descending instead -- see their own comments
+	// for why. An empty group's header is simply omitted rather than
+	// printed with nothing underneath it.
 	var managed, external []inventory.Version
 	for _, v := range versions {
 		if v.External {
@@ -153,10 +214,10 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSize
 	// than clearly communicating "there's nothing here yet".
 	if len(managed) == 0 && len(external) == 0 {
 		fmt.Println(styles.Neutral.Render(fmt.Sprintf("No %s versions found to list.", tool.DisplayName)))
-		return 0
+		return
 	}
 
-	printedManaged := printManagedGroup(tool, styles.Header.Render("Managed by SDK Keeper:"), managed, annotate)
+	printedManaged := printManagedGroup(tool, styles.Header.Render("Managed by SDK Keeper:"), managed, annotate, sizes)
 	if printedManaged && len(external) > 0 {
 		fmt.Println()
 	}
@@ -169,14 +230,25 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSize
 	// Temurin). Grouping by it would present unverified input as if
 	// it were a confirmed fact, unlike the managed section above,
 	// where the suffix is data sk itself generated during a real,
-	// verified install.
-	printGroup(styles.Header.Render("Not managed by SDK Keeper:"), external, annotate, "  ")
+	// verified install. Rendered in the distinct External style (see
+	// its own doc comment in term/style.go) -- not managed reads as
+	// visually different at a glance, not just via the header text.
+	printGroup(styles.External.Render("Not managed by SDK Keeper:"), external, annotate, sizes, "  ", true)
+	if showSizes && len(external) > 0 {
+		fmt.Println(styles.Detail.Render(
+			"  Tip: sizes above are real, but not managed by SDK Keeper -- `sk remove` won't free that space; delete manually if no longer needed.",
+		))
+	}
 
 	if showSizes {
 		fmt.Println()
-		fmt.Println(styles.Detail.Render(fmt.Sprintf("  %s total: %s", tool.DisplayName, formatMB(toolTotal))))
+		line := fmt.Sprintf("  %s total: %s", tool.DisplayName, formatMB(toolTotal))
+		if grandTotal > 0 {
+			pct := float64(toolTotal) / float64(grandTotal) * 100
+			line += fmt.Sprintf(" (%.0f%% of grand total)", pct)
+		}
+		fmt.Println(styles.Detail.Render(line))
 	}
-	return toolTotal
 }
 
 // printAllToolsList implements `sk list` with no arguments: one
@@ -191,14 +263,25 @@ func printToolListBody(tool tooldef.Tool, versions []inventory.Version, showSize
 // specifically to answer "what does sk support" regardless of
 // install state. Duplicating that here, and doing it worse as the
 // registry grows past a handful of tools (a wall of "No X versions
-// found), served no one. --format=json filters the same way, for the
-// same reason -- see buildAllToolsListJSON's own doc comment.
+// found" lines drowning the 2-3 tools someone actually has), served
+// no one. --format=json filters the same way, for the same reason --
+// see buildAllToolsListJSON's own doc comment.
+//
+// Runs in two passes when showSizes is on: every tool's sizes/total
+// are computed FIRST (nothing printed yet), so the real grand total
+// is known before any per-tool subtotal is printed -- each one can
+// then show its own share of the grand total, which would otherwise
+// be unknowable until after every tool had already been walked and
+// printed.
 func printAllToolsList(showSizes bool) error {
 	type populated struct {
 		tool     tooldef.Tool
 		versions []inventory.Version
+		sizes    map[string]int64
+		total    int64
 	}
 	var withInstalls []populated
+	var grandTotal int64
 	for _, tool := range sortedTools() {
 		versions, err := inventory.Scan(tool)
 		if err != nil {
@@ -207,7 +290,12 @@ func printAllToolsList(showSizes bool) error {
 		if len(versions) == 0 {
 			continue
 		}
-		withInstalls = append(withInstalls, populated{tool, versions})
+		p := populated{tool: tool, versions: versions}
+		if showSizes {
+			p.sizes, p.total = computeSizes(versions)
+			grandTotal += p.total
+		}
+		withInstalls = append(withInstalls, p)
 	}
 
 	if len(withInstalls) == 0 {
@@ -217,11 +305,10 @@ func printAllToolsList(showSizes bool) error {
 		return nil
 	}
 
-	var grandTotal int64
 	for _, p := range withInstalls {
 		fmt.Println()
 		fmt.Println(styles.Header.Render(p.tool.DisplayName + ":"))
-		grandTotal += printToolListBody(p.tool, p.versions, showSizes)
+		printToolListBody(p.tool, p.versions, p.sizes, p.total, grandTotal, showSizes)
 	}
 	fmt.Println()
 	if showSizes {
@@ -246,14 +333,21 @@ func printAllToolsList(showSizes bool) error {
 // bare-named managed entry from before vendor suffixes existed at all
 // (no recognizable suffix) falls into its own "Other" bucket, rather
 // than being silently mis-grouped or dropped.
-func printManagedGroup(tool tooldef.Tool, header string, group []inventory.Version, annotate func(inventory.Version) (string, string, string)) bool {
+//
+// When sizes is non-nil, each vendor's own sub-list (and the "Other"
+// bucket) is re-sorted by size descending before printing -- the
+// existing newest-first order stops being the useful one the moment
+// someone reaches for --sizes at all: they're almost certainly asking
+// "what's eating my disk", and the biggest offender belongs at the
+// top, not wherever it happens to fall in version order.
+func printManagedGroup(tool tooldef.Tool, header string, group []inventory.Version, annotate func(inventory.Version) (string, string, string, string), sizes map[string]int64) bool {
 	if len(group) == 0 {
 		return false
 	}
 
 	vendorNames := vendorNamesFor(tool.Name)
 	if len(vendorNames) < 2 {
-		return printGroup(header, group, annotate, "  ")
+		return printGroup(header, group, annotate, sizes, "  ", false)
 	}
 
 	byVendor := make(map[string][]inventory.Version, len(vendorNames))
@@ -272,10 +366,11 @@ func printManagedGroup(tool tooldef.Tool, header string, group []inventory.Versi
 	// its own rows. A real, live-reported bug this fixes: when one
 	// vendor's longest version number was a couple of characters
 	// shorter than another's, that vendor's whole table started its
-	// path column at a visibly different position, reading as
+	// size/path columns at a visibly different position, reading as
 	// inconsistent, "wrongly indented" alignment between two blocks
 	// that are otherwise meant to look like one continuous table.
 	versionColWidth := versionColumnWidth(group)
+	sizeColWidth := sizeColumnWidth(group, sizes)
 
 	fmt.Println(header)
 	for _, vendorName := range vendorNames {
@@ -283,12 +378,14 @@ func printManagedGroup(tool tooldef.Tool, header string, group []inventory.Versi
 		if len(sub) == 0 {
 			continue
 		}
+		sortBySizeDesc(sub, sizes)
 		fmt.Printf("  %s:\n", capitalize(vendorName))
-		printVersions(sub, annotate, "    ", versionColWidth)
+		printVersions(sub, annotate, "    ", versionColWidth, sizeColWidth, false)
 	}
 	if len(unrecognized) > 0 {
+		sortBySizeDesc(unrecognized, sizes)
 		fmt.Println("  Other:")
-		printVersions(unrecognized, annotate, "    ", versionColWidth)
+		printVersions(unrecognized, annotate, "    ", versionColWidth, sizeColWidth, false)
 	}
 	return true
 }
@@ -306,18 +403,36 @@ func versionVendor(number string, knownVendors []string) (string, bool) {
 }
 
 // printGroup prints a header followed by each version in the group.
-// Returns false (and prints nothing) if the group is empty.
-func printGroup(header string, group []inventory.Version, annotate func(inventory.Version) (string, string, string), indent string) bool {
+// Returns false (and prints nothing) if the group is empty. When
+// sizes is non-nil, group is re-sorted by size descending first --
+// see printManagedGroup's own comment for why. external controls
+// whether printVersions renders each row in the distinct External
+// style (see term/style.go).
+func printGroup(header string, group []inventory.Version, annotate func(inventory.Version) (string, string, string, string), sizes map[string]int64, indent string, external bool) bool {
 	if len(group) == 0 {
 		return false
 	}
+	sortBySizeDesc(group, sizes)
 	fmt.Println(header)
-	printVersions(group, annotate, indent, versionColumnWidth(group))
+	printVersions(group, annotate, indent, versionColumnWidth(group), sizeColumnWidth(group, sizes), external)
 	return true
 }
 
+// sortBySizeDesc reorders versions by their real size, largest first,
+// in place. A no-op when sizes is nil (showSizes wasn't requested) --
+// the default newest-first order from inventory.Scan is left exactly
+// as it was.
+func sortBySizeDesc(versions []inventory.Version, sizes map[string]int64) {
+	if sizes == nil {
+		return
+	}
+	sort.SliceStable(versions, func(i, j int) bool {
+		return sizes[versions[i].Number] > sizes[versions[j].Number]
+	})
+}
+
 // versionColumnWidth returns the widest version.Number across group --
-// the fixed width every version gets padded to, so the path column
+// the fixed width every version gets padded to, so the size column
 // lines up at the same position across multiple SEPARATE printVersions
 // calls (one per vendor) -- see printVersions' own doc comment for why
 // plain padding is used here rather than lipgloss/table.
@@ -331,9 +446,25 @@ func versionColumnWidth(group []inventory.Version) int {
 	return width
 }
 
-// width pad -- NOT lipgloss/table, deliberately. A real, live-
-// reported bug found while building an earlier, table-based version
-// printVersions prints each version, manually aligned via a fixed-
+// sizeColumnWidth mirrors versionColumnWidth, for the formatted size
+// text (e.g. "205.3 MB") instead of the version number -- the fixed
+// width the RIGHT-ALIGNED size column pads to, computed once across
+// the whole group being printed together, for the same alignment
+// reason versionColumnWidth exists. Returns 0 when sizes is nil
+// (nothing to align).
+func sizeColumnWidth(group []inventory.Version, sizes map[string]int64) int {
+	if sizes == nil {
+		return 0
+	}
+	width := 0
+	for _, v := range group {
+		if n := len(formatMB(sizes[v.Number])); n > width {
+			width = n
+		}
+	}
+	return width
+}
+
 // width pad -- NOT lipgloss/table, deliberately. A real, live-
 // reported bug found while building an earlier, table-based version
 // of this function: lipgloss/table redistributes column boundaries
@@ -355,9 +486,18 @@ func versionColumnWidth(group []inventory.Version) int {
 // those is always a single, self-contained render, never split across
 // several separate calls that need to visually line up with each
 // other.
-func printVersions(group []inventory.Version, annotate func(inventory.Version) (string, string, string), indent string, versionWidth int) {
+//
+// Column order is version, then (bar +) size right-aligned, then any
+// tags, then path last -- version and size are the two columns that
+// must actually line up row to row, so nothing of variable width sits
+// between them; tags are short, variable-presence annotations placed
+// after size instead, and path -- the least urgent thing to compare
+// at a glance -- trails at the end, styled External/muted+italic for
+// a not-managed row so the whole row reads as visually distinct, not
+// just its header above it.
+func printVersions(group []inventory.Version, annotate func(inventory.Version) (string, string, string, string), indent string, versionWidth, sizeWidth int, external bool) {
 	for _, v := range group {
-		current, def, size := annotate(v)
+		current, def, size, bar := annotate(v)
 		// "(current)" and "(default)" each keep their own distinct
 		// color (styles.Active vs styles.Default -- see
 		// Styles.Default's own doc comment for why: a real,
@@ -374,15 +514,22 @@ func printVersions(group []inventory.Version, annotate func(inventory.Version) (
 		if def != "" {
 			tags = append(tags, styles.Default.Render(def))
 		}
-		tag := ""
+		tagStr := ""
 		if len(tags) > 0 {
-			tag = " " + strings.Join(tags, " ")
+			tagStr = " " + strings.Join(tags, " ")
 		}
+
 		sizeCol := ""
 		if size != "" {
-			sizeCol = "  " + styles.Detail.Render(size)
+			sizeCol = fmt.Sprintf("  %s %*s", bar, sizeWidth, size)
 		}
-		fmt.Printf("%s%-*s  %s%s%s\n", indent, versionWidth, v.Number, displayPath(v), tag, sizeCol)
+
+		path := displayPath(v)
+		if external {
+			path = styles.External.Render(path)
+		}
+
+		fmt.Printf("%s%-*s%s%s  %s\n", indent, versionWidth, v.Number, sizeCol, tagStr, path)
 	}
 }
 
@@ -465,6 +612,14 @@ func buildPickerGroups(tool tooldef.Tool, versions []inventory.Version) []picker
 }
 
 // listInstalledEntry/listData are list's --format=json success shape.
+// Managed distinguishes a real sk-managed install (`sk remove` frees
+// its disk space) from an `add`-registered external entry (`sk
+// remove` only deletes the symlink; the real files, and SizeBytes'
+// real number, live on regardless) -- the machine-readable
+// counterpart to the plain-text "Tip: ... not managed by SDK Keeper"
+// line, so a script summing SizeBytes can make the same distinction a
+// human reading the text output would.
+//
 // SizeBytes is a pointer so it's omitted entirely (not present as
 // null or 0) unless --sizes was actually passed -- a plain
 // `sk list --format=json` shouldn't pay the directory-walk cost, or
@@ -475,6 +630,7 @@ type listInstalledEntry struct {
 	Vendor    *string `json:"vendor"`
 	IsDefault bool    `json:"isDefault"`
 	IsCurrent bool    `json:"isCurrent"`
+	Managed   bool    `json:"managed"`
 	SizeBytes *int64  `json:"sizeBytes,omitempty"`
 }
 
@@ -518,6 +674,7 @@ func buildListJSON(toolName string, showSizes bool) (*listData, *jsonError) {
 			Vendor:    vendorOf(tool.Name, v.Number),
 			IsDefault: v.Number == defaultVersion,
 			IsCurrent: v.Number == currentVersion,
+			Managed:   !v.External,
 		}
 		if showSizes {
 			n := dirSize(v.Path)

@@ -182,10 +182,10 @@ func TestPrintManagedGroup_VendorsShareIdenticalColumnAlignment(t *testing.T) {
 		{Number: "22.0.1-liberica", Path: "/x/JDK-22.0.1-liberica"},
 		{Number: "19-liberica", Path: "/x/JDK-19-liberica"},
 	}
-	annotate := func(v inventory.Version) (string, string, string) { return "", "", "" }
+	annotate := func(v inventory.Version) (string, string, string, string) { return "", "", "", "" }
 
 	out := captureStdout(t, func() {
-		printManagedGroup(tool, "Managed by SDK Keeper:", versions, annotate)
+		printManagedGroup(tool, "Managed by SDK Keeper:", versions, annotate, nil)
 	})
 
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
