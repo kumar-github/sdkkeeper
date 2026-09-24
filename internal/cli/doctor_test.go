@@ -249,14 +249,64 @@ func TestDoctorCheckJSONFrom_AnyNonWarningIsFail(t *testing.T) {
 	}
 }
 
-func TestTallyDoctorStatus_CountsCorrectly(t *testing.T) {
+func TestTallyIssues_EmptyCountsAsOnePass(t *testing.T) {
 	var summary doctorSummaryJSON
-	tallyDoctorStatus(&summary, "pass")
-	tallyDoctorStatus(&summary, "pass")
-	tallyDoctorStatus(&summary, "warn")
-	tallyDoctorStatus(&summary, "fail")
-	if summary.Pass != 2 || summary.Warn != 1 || summary.Fail != 1 {
-		t.Errorf("expected pass=2 warn=1 fail=1, got %+v", summary)
+	tallyIssues(&summary, nil)
+	if summary.Pass != 1 || summary.Warn != 0 || summary.Fail != 0 {
+		t.Errorf("expected (1,0,0) for an empty issue list, got %+v", summary)
+	}
+}
+
+// TestTallyIssues_CountsEachIssueIndividually is the regression test
+// for the actual reported gap: JSON's summary used to count by named
+// check (1 per check regardless of how many issues it held), while
+// text counted per item -- 2 dangling registrations showed as 2 in
+// text but 1 in JSON. tallyIssues is the single shared rule both now
+// use; this confirms it counts each issue on its own, not "1 per
+// call".
+func TestTallyIssues_CountsEachIssueIndividually(t *testing.T) {
+	var summary doctorSummaryJSON
+	tallyIssues(&summary, []doctorIssue{
+		{warning: false, message: "JDK 25.0.1 is registered, but its real target no longer exists"},
+		{warning: false, message: "JDK 21.0.2 is registered, but its real target no longer exists"},
+	})
+	if summary.Pass != 0 || summary.Warn != 0 || summary.Fail != 2 {
+		t.Errorf("expected (0,0,2) for 2 real issues, got %+v", summary)
+	}
+}
+
+func TestTallyIssues_AccumulatesAcrossMultipleCalls(t *testing.T) {
+	var summary doctorSummaryJSON
+	tallyIssues(&summary, nil)                                                                             // +1 pass
+	tallyIssues(&summary, []doctorIssue{{warning: true, message: "w"}})                                    // +1 warn
+	tallyIssues(&summary, []doctorIssue{{warning: false, message: "f1"}, {warning: false, message: "f2"}}) // +2 fail
+	if summary.Pass != 1 || summary.Warn != 1 || summary.Fail != 2 {
+		t.Errorf("expected (1,1,2) accumulated across calls, got %+v", summary)
+	}
+}
+
+// TestPrintCheckAndTallyIssues_AgreeOnTheSameIssueList confirms text
+// (printCheck) and JSON (tallyIssues, via buildDoctorJSON) genuinely
+// can't diverge anymore -- both classify the EXACT same issue list
+// identically, since printCheck's own per-item counting and
+// tallyIssues share the same `.warning`-based rule.
+func TestPrintCheckAndTallyIssues_AgreeOnTheSameIssueList(t *testing.T) {
+	issues := []doctorIssue{
+		{warning: false, message: "JDK 25.0.1 is registered, but its real target no longer exists"},
+		{warning: false, message: "JDK 21.0.2 is registered, but its real target no longer exists"},
+	}
+
+	var textPass, textWarn, textFail int
+	withSession(t, func() {
+		textPass, textWarn, textFail = printCheck("dangling registration", "dangling registrations", issues)
+	})
+
+	var jsonSummary doctorSummaryJSON
+	tallyIssues(&jsonSummary, issues)
+
+	if textPass != jsonSummary.Pass || textWarn != jsonSummary.Warn || textFail != jsonSummary.Fail {
+		t.Errorf("expected text and JSON to agree exactly, got text=(%d,%d,%d) json=%+v",
+			textPass, textWarn, textFail, jsonSummary)
 	}
 }
 

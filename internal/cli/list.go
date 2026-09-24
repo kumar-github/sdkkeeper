@@ -98,21 +98,25 @@ func computeSizes(versions []inventory.Version) (map[string]int64, int64) {
 }
 
 // sizeBar draws a compact, fixed-width relative-size indicator, e.g.
-// "████████░░" -- filled proportionally to size/maxSize, so an entry
+// "━━━━━━━━──" -- filled proportionally to size/maxSize, so an entry
 // that dwarfs the others in the same listing is visually obvious at a
 // glance, not just from reading the numbers. maxSize is the largest
 // SINGLE entry across the tool's WHOLE listing (managed and external
 // together, computed once in printToolListBody) -- not scoped to just
 // one vendor's own sub-list -- so a manually add-registered JDK that
 // dwarfs the managed ones reads as visually obvious too, not just
-// relative to its own small group. Same Unicode block-character
-// technique as the download progress bar (renderDownloadProgress),
-// just much narrower: this is an inline per-row indicator, not a
-// full standalone progress display.
+// relative to its own small group. Same thin-line technique as the
+// download progress bar (renderDownloadProgress), just much narrower:
+// this is an inline per-row indicator, not a full standalone progress
+// display. Uses ━/─ (heavy/light horizontal line) rather than the
+// solid █/░ blocks an earlier version used -- the full-height blocks
+// read as visually "too thick" for a compact inline indicator sitting
+// next to plain text on the same line; a thin line matches the rest
+// of the row's own weight better.
 func sizeBar(size, maxSize int64) string {
 	const barWidth = 10
 	if maxSize <= 0 {
-		return strings.Repeat("\u2591", barWidth)
+		return strings.Repeat("\u2500", barWidth)
 	}
 	filled := int(float64(barWidth) * float64(size) / float64(maxSize))
 	if filled > barWidth {

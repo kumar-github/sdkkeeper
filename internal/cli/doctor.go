@@ -243,30 +243,27 @@ func runDoctorFix() error {
 
 // printCheck renders one check's result: "✓ No X" if issues is empty,
 // or a "✗/⚠ N X found:" header with each issue as a sub-line. Returns
-// the count printed, for the overall summary tally.
-// printCheck prints one check's detailed findings (unchanged from
-// before), and returns a PER-ITEM pass/warn/fail tally -- each issue
-// counted individually (2 dangling registrations -> 2, not 1),
-// classified by its own `.warning` field, not "the whole check counts
-// as whichever category applies to ALL of it". Matches what's
-// actually visible on screen: the header's own glyph/style still
-// summarizes the whole block via allWarnings (a real failure present
-// anywhere makes the header read as ✗, not ⚠), but the compact
-// summary line's NUMBERS now count individual findings, since that's
-// what the user actually sees printed -- they have no visibility into
-// "check groups" as a concept, only the individual lines under each
-// header.
+// a PER-ITEM pass/warn/fail tally -- each issue counted individually
+// (2 dangling registrations -> 2, not 1), classified by its own
+// `.warning` field, not "the whole check counts as whichever category
+// applies to ALL of it". Matches what's actually visible on screen:
+// the header's own glyph/style still summarizes the whole block via
+// allWarnings (a real failure present anywhere makes the header read
+// as ✗, not ⚠), but the compact summary line's NUMBERS count
+// individual findings, since that's what the user actually sees
+// printed -- they have no visibility into "check groups" as a
+// concept, only the individual lines under each header.
 //
-// This is a deliberate divergence from --format=json's own summary,
-// which still counts by NAMED CHECK (one pass/warn/fail per check,
-// e.g. "dangling_registrations": "fail", regardless of how many
-// stale entries it found) -- that's the design doc's own frozen,
-// already-documented schema, and restructuring it to also split into
-// one entry per individual issue would be a real, separate breaking
-// change to a machine-readable contract scripts may already depend
-// on. Text and JSON now count DIFFERENTLY on purpose: text answers
-// "how many problems did I just read", JSON answers "which named
-// checks failed".
+// buildDoctorJSON's own summary now counts the SAME way (via
+// tallyIssues, sharing this exact per-item rule) -- an earlier
+// version of this counted by named check instead (matching the
+// checks[] array's own one-status-per-check shape), which meant text
+// and JSON disagreed on a real, reported case: 2 dangling
+// registrations showed as 2 in text but 1 in JSON's summary. The
+// checks[] array's own per-check Status field is UNCHANGED (still one
+// pass/warn/fail value per named check, the frozen, already-shipped
+// schema) -- only the aggregate summary.pass/warn/fail numbers were
+// reconciled to match text.
 func printCheck(singular, plural string, issues []doctorIssue) (pass, warn, fail int) {
 	if len(issues) == 0 {
 		fmt.Fprintln(session.Out, styles.Success.Render(fmt.Sprintf("\u2713 No %s", plural)))
@@ -438,14 +435,15 @@ func checkLeftoverTempDirs() []doctorIssue {
 // offline machine. Iterates every registered tool/provider
 // generically, so a future tool is picked up automatically.
 // printVendorReachability prints one line per tool+vendor
-// combination, and now returns a per-line pass/fail tally too --
-// each individual vendor counted separately (4 unreachable vendors
-// -> 4, not 1), matching printCheck's own same reasoning: the user
-// sees 4 individual lines, so the summary counts 4, not "1 combined
-// vendor_reachability finding". Diverges from
-// buildVendorReachabilityCheckJSON's own single combined check for
-// the same documented-JSON-contract reason printCheck's own doc
-// comment explains.
+// combination, and returns a per-line pass/fail tally too -- each
+// individual vendor counted separately (4 unreachable vendors -> 4,
+// not 1), matching printCheck's own same reasoning: the user sees 4
+// individual lines, so the summary counts 4, not "1 combined
+// vendor_reachability finding". buildVendorReachabilityCheckJSON's
+// own summary contribution counts the same way now too (its checks[]
+// entry itself is still one combined pass/fail status, unchanged --
+// only its tallied pass/fail counts, returned alongside that entry,
+// match this per-vendor rule).
 func printVendorReachability(ctx context.Context) (pass, fail int) {
 	for _, tool := range sortedTools() {
 		for _, name := range vendorNamesFor(tool.Name) {
@@ -518,8 +516,16 @@ type doctorData struct {
 
 // buildDoctorJSON reuses the same, pure checkX functions the
 // interactive path's printCheck calls, so JSON and text can never
-// disagree about which issues were found. Vendor reachability is
-// folded into one named check here, rather than per-vendor.
+// disagree about which issues were found. Each check's own Status in
+// the checks[] array stays exactly as documented (one pass/warn/fail
+// value per named check -- the frozen, already-shipped schema) --
+// only the SUMMARY's numeric tally counts per individual issue now
+// (via tallyIssues, the same per-item classification printCheck's own
+// return values use), reconciling a real, reported gap: text and JSON
+// used to count "2 dangling registrations" as 2 vs. 1 respectively.
+// Vendor reachability is still folded into one named check in checks[]
+// (unchanged), but its OWN summary contribution is now per-vendor too,
+// matching printVendorReachability's own per-line text counting.
 func buildDoctorJSON(ctx context.Context) *doctorData {
 	type namedCheck struct {
 		name   string
@@ -536,16 +542,38 @@ func buildDoctorJSON(ctx context.Context) *doctorData {
 	var checks []doctorCheckJSON
 	var summary doctorSummaryJSON
 	for _, g := range groups {
-		c := doctorCheckJSONFrom(g.name, g.plural, g.issues)
-		checks = append(checks, c)
-		tallyDoctorStatus(&summary, c.Status)
+		checks = append(checks, doctorCheckJSONFrom(g.name, g.plural, g.issues))
+		tallyIssues(&summary, g.issues)
 	}
 
-	vendorCheck := buildVendorReachabilityCheckJSON(ctx)
+	vendorCheck, vendorPass, vendorFail := buildVendorReachabilityCheckJSON(ctx)
 	checks = append(checks, vendorCheck)
-	tallyDoctorStatus(&summary, vendorCheck.Status)
+	summary.Pass += vendorPass
+	summary.Fail += vendorFail
 
 	return &doctorData{Checks: checks, Summary: summary}
+}
+
+// tallyIssues adds one check's issues into the running summary,
+// individually -- the SAME per-item classification printCheck's own
+// return values use (an empty check contributes 1 pass; each real
+// issue contributes to warn or fail based on its own `.warning`
+// field), so text and --format=json's summary counts can never
+// diverge again. The single source of truth for that rule; both
+// printCheck and buildDoctorJSON call into logic shaped this same
+// way rather than each reimplementing it.
+func tallyIssues(summary *doctorSummaryJSON, issues []doctorIssue) {
+	if len(issues) == 0 {
+		summary.Pass++
+		return
+	}
+	for _, issue := range issues {
+		if issue.warning {
+			summary.Warn++
+		} else {
+			summary.Fail++
+		}
+	}
 }
 
 // doctorCheckJSONFrom mirrors printCheck's own pass/warn/fail rule,
@@ -566,8 +594,11 @@ func doctorCheckJSONFrom(name, plural string, issues []doctorIssue) doctorCheckJ
 }
 
 // buildVendorReachabilityCheckJSON mirrors printVendorReachability's
-// loop, collecting results into one named check.
-func buildVendorReachabilityCheckJSON(ctx context.Context) doctorCheckJSON {
+// loop, collecting results into one named check (unchanged) but ALSO
+// returning per-vendor pass/fail counts for the summary tally --
+// matching printVendorReachability's own per-line text counting (4
+// unreachable vendors contribute 4 to the summary, not 1).
+func buildVendorReachabilityCheckJSON(ctx context.Context) (check doctorCheckJSON, pass, fail int) {
 	var problems []string
 	reachable := 0
 	for _, tool := range sortedTools() {
@@ -584,22 +615,9 @@ func buildVendorReachabilityCheckJSON(ctx context.Context) doctorCheckJSON {
 		}
 	}
 	if len(problems) == 0 {
-		return doctorCheckJSON{Name: "vendor_reachability", Status: "pass", Message: fmt.Sprintf("%d vendor API(s) reachable", reachable)}
+		return doctorCheckJSON{Name: "vendor_reachability", Status: "pass", Message: fmt.Sprintf("%d vendor API(s) reachable", reachable)}, reachable, 0
 	}
-	return doctorCheckJSON{Name: "vendor_reachability", Status: "fail", Message: strings.Join(problems, "; ")}
-}
-
-// tallyDoctorStatus adds one check's status into the running summary
-// counts.
-func tallyDoctorStatus(summary *doctorSummaryJSON, status string) {
-	switch status {
-	case "pass":
-		summary.Pass++
-	case "warn":
-		summary.Warn++
-	case "fail":
-		summary.Fail++
-	}
+	return doctorCheckJSON{Name: "vendor_reachability", Status: "fail", Message: strings.Join(problems, "; ")}, reachable, len(problems)
 }
 
 // emitDoctorJSON is doctor's own emitter, not the shared emitJSON:
