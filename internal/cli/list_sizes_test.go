@@ -299,7 +299,8 @@ func TestSizeBar_ProportionalFill(t *testing.T) {
 	}
 	for _, c := range cases {
 		bar := sizeBar(c.size, c.maxSize)
-		got := strings.Count(bar, "\u2588")
+		//got := strings.Count(bar, "\u2588")
+		got := strings.Count(bar, "\u2501")
 		if got != c.wantFilled {
 			t.Errorf("sizeBar(%d, %d): expected %d filled chars, got %d (%q)", c.size, c.maxSize, c.wantFilled, got, bar)
 		}
@@ -311,7 +312,8 @@ func TestSizeBar_ProportionalFill(t *testing.T) {
 
 func TestSizeBar_ZeroMaxSizeIsAllEmpty(t *testing.T) {
 	bar := sizeBar(0, 0)
-	if strings.Count(bar, "\u2588") != 0 {
+	//if strings.Count(bar, "\u2588") != 0 {
+	if strings.Count(bar, "\u2501") != 0 {
 		t.Errorf("expected an all-empty bar when maxSize is 0, got %q", bar)
 	}
 }

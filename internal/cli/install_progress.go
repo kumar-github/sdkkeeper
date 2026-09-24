@@ -36,7 +36,8 @@ func renderDownloadProgress(read, total int64, elapsed time.Duration) string {
 	if filled > barWidth {
 		filled = barWidth
 	}
-	bar := strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", barWidth-filled)
+	//bar := strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", barWidth-filled)
+	bar := strings.Repeat("\u2501", filled) + strings.Repeat("\u2500", barWidth-filled)
 	percent := float64(read) / float64(total) * 100
 
 	line := fmt.Sprintf("[%s] %.0f%% (%s / %s)", bar, percent, formatMB(read), formatMB(total))

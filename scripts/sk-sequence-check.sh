@@ -1388,8 +1388,10 @@ big_line=$(echo "$SK_OUT" | grep -n "21.0.2-temurin" | cut -d: -f1)
 small_line=$(echo "$SK_OUT" | grep -n "16.0.2-temurin" | cut -d: -f1)
 assert_true "$([[ -n "$big_line" && -n "$small_line" && "$big_line" -lt "$small_line" ]] && echo true || echo false)" \
     "the padded 5MB entry (21.0.2) prints before the tiny fake_jdk entry (16.0.2) within the managed section"
-assert_contains "$SK_OUT" "█" "a filled block character appears somewhere in the bar column"
-assert_contains "$SK_OUT" "░" "an empty block character appears somewhere in the bar column"
+#assert_contains "$SK_OUT" "█" "a filled block character appears somewhere in the bar column"
+assert_contains "$SK_OUT" "━" "a filled block character appears somewhere in the bar column"
+#assert_contains "$SK_OUT" "░" "an empty block character appears somewhere in the bar column"
+assert_contains "$SK_OUT" "─" "an empty block character appears somewhere in the bar column"
 rm -rf "$CANDIDATES/JDK-16.0.2-temurin"
 
 step "S6. Grand total percentage appears in the all-tools view, not the single-tool one"

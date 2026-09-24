@@ -121,7 +121,8 @@ func sizeBar(size, maxSize int64) string {
 	if filled < 0 {
 		filled = 0
 	}
-	return strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", barWidth-filled)
+	//return strings.Repeat("\u2588", filled) + strings.Repeat("\u2591", barWidth-filled)
+	return strings.Repeat("\u2501", filled) + strings.Repeat("\u2500", barWidth-filled)
 }
 
 // printToolListBody renders one tool's installed versions -- exactly
